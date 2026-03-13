@@ -1,29 +1,34 @@
-name: Stock Scanner KR
+name: Stock Alert
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # 한국 시간 오후 5:00 (장 마감 후)
-  workflow_dispatch:      # 수동 실행 버튼 활성화
+    - cron: '30 06 * * *'  # KST 08:30 (UTC 기준 23:30)
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
 
+    steps:
+      # 1. 코드 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2. Python 설치
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
+      # 3. 의존성 설치
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install yfinance pandas numpy requests lxml cryptography
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests lxml
 
-      - name: Run Script
+      # 4. 스크립트 실행
+      - name: Run Stock Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python script.py  # <--- 파일명이 script.py 인지 꼭 확인!
+        run: python script.py
