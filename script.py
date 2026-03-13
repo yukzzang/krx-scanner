@@ -1,4 +1,5 @@
 import FinanceDataReader as fdr
+import pandas as pd
 
 print("FinanceDataReader import 성공!")
 
