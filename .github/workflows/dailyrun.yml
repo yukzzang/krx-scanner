@@ -1,34 +1,26 @@
-name: Stock Alert
+name: Run KOSPI/KOSDAQ Strategy
 
 on:
   schedule:
-    - cron: '30 06 * * *'  # KST 08:30 (UTC 기준 23:30)
+    - cron: '0 18 * * 1-5'  # 평일 18시 실행
   workflow_dispatch:
 
 jobs:
-  build:
+  run_strategy:
     runs-on: ubuntu-latest
-
     steps:
-      # 1. 코드 체크아웃
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      # 2. Python 설치
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      # 3. 의존성 설치
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas numpy requests lxml
+        run: pip install -r requirements.txt
 
-      # 4. 스크립트 실행
-      - name: Run Stock Script
+      - name: Run strategy script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python script.py
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
