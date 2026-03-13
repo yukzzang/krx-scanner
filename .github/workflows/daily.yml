@@ -1,0 +1,25 @@
+name: Telegram Alert
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 매일 실행
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 다운로드
+        uses: actions/checkout@v3
+
+      - name: Python 설치
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: requests 설치
+        run: pip install requests
+
+      - name: 코드 실행
+        run: python script.py
