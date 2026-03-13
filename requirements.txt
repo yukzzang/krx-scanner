@@ -1,0 +1,4 @@
+finance-datareader
+requests
+pandas
+lxml
