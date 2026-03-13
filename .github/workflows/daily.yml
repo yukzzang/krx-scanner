@@ -1,25 +1,27 @@
-name: Telegram Alert
+name: Telegram Bot
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # 매일 실행
+    - cron: "30 06 * * *"
   workflow_dispatch:
 
 jobs:
-  run:
+  send-message:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 코드 다운로드
+      - name: 저장소 다운로드
         uses: actions/checkout@v3
 
       - name: Python 설치
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      - name: requests 설치
-        run: pip install requests
+      - name: 라이브러리 설치
+        run: |
+          pip install requests
+          pip install finance-datareader
 
-      - name: 코드 실행
+      - name: Python 실행
         run: python script.py
