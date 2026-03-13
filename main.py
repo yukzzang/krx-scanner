@@ -141,7 +141,7 @@ def main():
 
     results.sort(key=lambda x: x["score"], reverse=True)
     msg = "🚀 전략 포착 종목\n\n"
-    for s in results[:10]:
+    for s in results[:20]:
         msg += f"✅ {s['ticker']} ({s['score']}점) | 가격 {s['price']} | 거래대금 {s['value']}억 | RSI {s['rsi']} | 거래량 {s['vol']}x\n"
 
     print(msg)
