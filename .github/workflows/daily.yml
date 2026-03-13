@@ -1,12 +1,12 @@
-name: Telegram Bot
+name: KRX Scanner
 
 on:
-  schedule:
-    - cron: "30 06 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
 
 jobs:
-  send-message:
+  run-script:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,8 +20,8 @@ jobs:
 
       - name: 라이브러리 설치
         run: |
-          pip install requests
-          pip install finance-datareader
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Python 실행
         run: python script.py
