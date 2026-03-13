@@ -199,7 +199,7 @@ def main():
 
     if TELEGRAM_TOKEN:
         url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload={"chat_id":CHAT_ID,"text":msg}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
         requests.post(url,json=payload)
 
 if __name__=="__main__":
