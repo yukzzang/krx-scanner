@@ -1,168 +1,206 @@
 import os
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import requests
 import time
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ==========================================
-# 1️⃣ GitHub Secrets 환경 변수 로드
-# ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_ACTUAL_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_ACTUAL_ID")
-MIN_SSM_SCORE = 60
+# ==================================
+# 환경 변수
+# ==================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN","")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
+MIN_SCORE = 60
 
-# ==========================================
-# 2️⃣ 코스피 / 코스닥 종목 수집
-# ==========================================
+# ==================================
+# 1️⃣ 티커 수집
+# ==================================
 def get_combined_tickers():
-    print("🔎 코스피/코스닥 종목 리스트 수집 시작...")
-    tickers = []
+    tickers=[]
+    base="https://finance.naver.com/sise/sise_market_sum.naver?sosok={}&page={}"
 
-    base_url = "https://finance.naver.com/sise/sise_market_sum.naver?sosok={}&page={}"
-
-    for market_code in [0, 1]:  # 0: 코스피, 1: 코스닥
-        page = 1
+    for market in [0,1]:
+        page=1
         while True:
-            url = base_url.format(market_code, page)
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(url, headers=headers)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            table = soup.find("table", class_="type_2")
+            url=base.format(market,page)
+            r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'})
+            soup=BeautifulSoup(r.text,"html.parser")
+            table=soup.find("table",class_="type_2")
             if table is None: break
-            rows = table.find_all("tr")[2:]  # 헤더 제외
-            cnt = 0
+            rows=table.find_all("tr")[2:]
+            cnt=0
             for row in rows:
-                cols = row.find_all("td")
-                if len(cols) < 2: continue
-                code_tag = cols[1].find("a")
-                if code_tag and 'href' in code_tag.attrs:
-                    href = code_tag.attrs['href']
-                    code = href.split('code=')[-1]
-                    tickers.append(code + ".KS" if market_code == 0 else code + ".KQ")
-                    cnt += 1
-            if cnt == 0: break
-            page += 1
-            time.sleep(0.5)
-
-    print(f"🚀 최종 수집된 티커: {len(tickers)}개")
+                cols=row.find_all("td")
+                if len(cols)<2: continue
+                a=cols[1].find("a")
+                if a:
+                    code=a["href"].split("code=")[-1]
+                    ticker=code+".KS" if market==0 else code+".KQ"
+                    tickers.append(ticker)
+                    cnt+=1
+            if cnt==0: break
+            page+=1
+            time.sleep(0.2)
+    print("총 종목:",len(tickers))
     return tickers
 
-# ==========================================
-# 3️⃣ 전략 계산 로직 (기관수급 + MACD + RSI)
-# ==========================================
-def compute_ssm_strategy(df):
-    if df is None or len(df) < 50: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    close = df['Close'].values.flatten()
-    high = df['High'].values.flatten()
-    low = df['Low'].values.flatten()
-    volume = df['Volume'].values.flatten()
-    last_close = float(close[-1])
-    day_volume_krw = last_close * volume[-1]
-
-    # --- 기관 수급 지표: OBV ---
-    obv = [0]
-    for i in range(1, len(close)):
-        if close[i] > close[i-1]:
-            obv.append(obv[-1] + volume[i])
-        elif close[i] < close[i-1]:
-            obv.append(obv[-1] - volume[i])
+# ==================================
+# 2️⃣ OBV 다이버전스
+# ==================================
+def obv_divergence(close,volume):
+    obv=[0]
+    for i in range(1,len(close)):
+        if close.iloc[i]>close.iloc[i-1]:
+            obv.append(obv[-1]+volume.iloc[i])
+        elif close.iloc[i]<close.iloc[i-1]:
+            obv.append(obv[-1]-volume.iloc[i])
         else:
             obv.append(obv[-1])
-    obv_ser = pd.Series(obv)
-    obv_ema5 = obv_ser.ewm(span=5).mean()
+    obv=pd.Series(obv)
+    price_range=(close[-10:].max()-close[-10:].min())/close[-10:].mean()
+    if price_range>0.07: return False
+    if obv.iloc[-1]<=obv.iloc[-10]: return False
+    return True
 
-    # 필수 조건: 기관 수급 (OBV 상승 + 거래대금 7억 원 이상)
-    is_institutional_buy = (obv_ser.iloc[-1] > obv_ema5.iloc[-1]) and (day_volume_krw > 700000000)
-    if not is_institutional_buy: return None
+# ==================================
+# 3️⃣ ATR contraction
+# ==================================
+def atr_contraction(high,low):
+    atr=(high-low).rolling(14).mean()
+    if atr.iloc[-1]>atr.iloc[-10]: return False
+    return True
 
-    close_ser = pd.Series(close)
+# ==================================
+# 4️⃣ OBV EMA 상승
+# ==================================
+def obv_trend(close,volume):
+    obv=[0]
+    for i in range(1,len(close)):
+        if close.iloc[i]>close.iloc[i-1]:
+            obv.append(obv[-1]+volume.iloc[i])
+        elif close.iloc[i]<close.iloc[i-1]:
+            obv.append(obv[-1]-volume.iloc[i])
+        else:
+            obv.append(obv[-1])
+    obv=pd.Series(obv)
+    obv_ema=obv.ewm(span=10).mean()
+    if obv.iloc[-1]<obv_ema.iloc[-1]: return False
+    return True
+
+# ==================================
+# 5️⃣ 전략 계산
+# ==================================
+def compute_strategy(df):
+    if df is None or len(df)<90: return None
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+
+    close=df["Close"]
+    high=df["High"]
+    low=df["Low"]
+    volume=df["Volume"]
+    price=close.iloc[-1]
+    value=price*volume.iloc[-1]
+
+    # 거래대금
+    if value<1_000_000_000: return None
+
     # MACD
-    ema12 = close_ser.ewm(span=12, adjust=False).mean()
-    ema26 = close_ser.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
+    ema12=close.ewm(span=12).mean()
+    ema26=close.ewm(span=26).mean()
+    macd=ema12-ema26
+    signal=macd.ewm(span=9).mean()
+    if not (macd.iloc[-1]>signal.iloc[-1] and macd.iloc[-2]<=signal.iloc[-2]): return None
+
     # RSI
-    delta = close_ser.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
-    # SMA20, ADR, 거래배수
-    sma20 = close_ser.rolling(20).mean().iloc[-1]
-    adr = ((pd.Series(high) - pd.Series(low)).rolling(14).mean() / close_ser * 100).iloc[-1]
-    vol_ma20 = pd.Series(volume).rolling(20).mean().iloc[-1]
-    vol_ratio = volume[-1] / vol_ma20 if vol_ma20 > 0 else 0
+    delta=close.diff()
+    gain=(delta.where(delta>0,0)).rolling(14).mean()
+    loss=(-delta.where(delta<0,0)).rolling(14).mean()
+    rsi=100-(100/(1+(gain/loss)))
+    rsi=rsi.iloc[-1]
+    if not (30<=rsi<=65): return None
 
-    # MACD 골든크로스 최근 3일
-    is_macd_gc = False
-    for i in range(-1, -4, -1):
-        if (macd.iloc[i] > signal.iloc[i]) and (macd.iloc[i-1] <= signal.iloc[i-1]):
-            is_macd_gc = True
-            break
-    if not is_macd_gc: return None
-    if not (20 <= rsi <= 65) or last_close < sma20: return None
+    # 이동평균
+    sma20=close.rolling(20).mean().iloc[-1]
+    sma60=close.rolling(60).mean().iloc[-1]
+    if price<sma20 or sma20<sma60: return None
 
-    # 점수 산정
-    score = 50
-    if is_institutional_buy: score += 10
-    if vol_ratio >= 1.5: score += 10
-    if vol_ratio >= 2.0: score += 10
-    if adr >= 2.5: score += 10
-    if rsi >= 45: score += 10
+    # ADR
+    adr=((high-low).rolling(14).mean()/close*100).iloc[-1]
+    if adr<3: return None
+
+    # 거래량
+    vol_ratio=volume.iloc[-1]/volume.rolling(20).mean().iloc[-1]
+    if vol_ratio<1.3: return None
+
+    # OBV divergence
+    if not obv_divergence(close,volume): return None
+
+    # ATR contraction
+    if not atr_contraction(high,low): return None
+
+    # OBV EMA 상승
+    if not obv_trend(close,volume): return None
+
+    # 점수
+    score=60
+    if vol_ratio>=1.5: score+=10
+    if adr>=4: score+=10
+    if rsi>=50: score+=10
 
     return {
-        "score": score,
-        "current": round(last_close, 2),
-        "rsi": round(float(rsi), 1),
-        "adr": round(float(adr), 2),
-        "vol_ratio": round(float(vol_ratio), 2),
-        "volume_krw_b": round(day_volume_krw / 100000000, 1)
+        "score":score,
+        "price":round(price,2),
+        "rsi":round(rsi,1),
+        "adr":round(adr,2),
+        "vol":round(vol_ratio,2),
+        "value":round(value/100000000,1)
     }
 
-# ==========================================
-# 4️⃣ 메인 실행부
-# ==========================================
+# ==================================
+# 6️⃣ 종목 분석
+# ==================================
+def analyze_ticker(ticker):
+    try:
+        df=yf.download(ticker,period="120d",interval="1d",progress=False)
+        if df.empty: return None
+        result=compute_strategy(df)
+        if result: return {"ticker":ticker,**result}
+    except: return None
+
+# ==================================
+# 7️⃣ 메인
+# ==================================
 def main():
-    tickers = get_combined_tickers()
-    found_stocks = []
+    tickers=get_combined_tickers()
+    results=[]
+    print("분석 시작")
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures=[executor.submit(analyze_ticker,t) for t in tickers]
+        for future in as_completed(futures):
+            r=future.result()
+            if r:
+                results.append(r)
+                print("포착:",r["ticker"])
 
-    print(f"⏳ 분석 시작 (기관수급 + MACD 골크 + RSI 20-65)...")
-    for i, t in enumerate(tickers):
-        try:
-            df = yf.download(t, period="60d", interval="1d", progress=False)
-            if df.empty: continue
-            result = compute_ssm_strategy(df)
-            if result and result["score"] >= MIN_SSM_SCORE:
-                found_stocks.append({"ticker": t, **result})
-                print(f"🎯 포착: {t} | 점수: {result['score']} | 대금: {result['volume_krw_b']}억 원")
-        except: continue
-        if i % 50 == 0: print(f"진행: {i}/{len(tickers)}...")
+    if len(results)==0:
+        print("조건 종목 없음")
+        return
 
-    if found_stocks:
-        found_stocks.sort(key=lambda x: x['score'], reverse=True)
-        msg = "🚀 **기관수급 & MACD 골든크로스 포착**\n\n"
-        for s in found_stocks[:15]:
-            msg += f"✅ *{s['ticker']}* ({s['score']}점)\n"
-            msg += f"   - 현재가: {s['current']} | 거래대금: {s['volume_krw_b']}억 원\n"
-            msg += f"   - RSI: {s['rsi']} | ADR: {s['adr']}% | 거래배수: {s['vol_ratio']}x\n\n"
+    results.sort(key=lambda x:x["score"],reverse=True)
+    msg="🚀 OBV Divergence Scanner\n\n"
+    for s in results[:10]:
+        msg+=f"✅ {s['ticker']} ({s['score']}점)\n"
+        msg+=f"가격 {s['price']} | 거래대금 {s['value']}억\n"
+        msg+=f"RSI {s['rsi']} | ADR {s['adr']} | 거래량 {s['vol']}x\n\n"
 
-        if TELEGRAM_TOKEN != "YOUR_ACTUAL_TOKEN":
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-            res = requests.post(url, json=payload)
-            if res.status_code == 200:
-                print("✅ 텔레그램 메시지 전송 완료")
-            else:
-                print(f"❌ 전송 실패: {res.text}")
-        else:
-            print("\n[알림] 토큰 설정이 없어 콘솔에 출력합니다.")
-            print(msg)
-    else:
-        print("📭 조건에 맞는 종목이 없습니다.")
+    print(msg)
 
-if __name__ == "__main__":
+    if TELEGRAM_TOKEN:
+        url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload={"chat_id":CHAT_ID,"text":msg}
+        requests.post(url,json=payload)
+
+if __name__=="__main__":
     main()
