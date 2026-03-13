@@ -3,11 +3,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
+import io
 import time
 
 # ================================
-# 텔레그램 설정 로드
+# 환경 변수 출력 (디버깅용)
 # ================================
+print("🔹 TELEGRAM_TOKEN 설정:", bool(os.environ.get("TELEGRAM_TOKEN")))
+print("🔹 TELEGRAM_CHAT_ID 설정:", bool(os.environ.get("TELEGRAM_CHAT_ID")))
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -16,21 +20,26 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
     exit(1)
 
 # ================================
-# KRX 종목 리스트 가져오기
+# KRX 종목 리스트 가져오기 (requests 사용)
 # ================================
 def get_krx_tickers():
     print("🔎 종목 리스트 수집 중...")
+    url = "https://raw.githubusercontent.com/mrstock/KoreaStockCode/master/KoreaStockCode.csv"
     try:
-        url = "https://raw.githubusercontent.com/mrstock/KoreaStockCode/master/KoreaStockCode.csv"
-        df = pd.read_csv(url, dtype={'code': str})
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()  # HTTP 오류 시 예외 발생
+        df = pd.read_csv(io.StringIO(resp.text), dtype={'code': str})
         df['full_code'] = np.where(df['market'] == 'KOSPI', df['code'] + ".KS", df['code'] + ".KQ")
-        return df['full_code'].tolist()[:350]  # 상위 350개만 처리
+        tickers = df['full_code'].tolist()[:350]  # 상위 350개만 처리
+        print(f"✅ {len(tickers)}개 종목 수집 완료")
+        return tickers
     except Exception as e:
-        print("⚠️ 종목 리스트 로드 실패:", e)
-        return ["005930.KS", "000660.KS", "035420.KS", "035720.KS"]  # 기본 종목
+        print(f"⚠️ 종목 리스트 로드 실패: {e}")
+        # 최소 기본 종목 리턴
+        return ["005930.KS", "000660.KS", "035420.KS", "035720.KS"]
 
 # ================================
-# 텔레그램 메시지 전송 (재시도 포함)
+# 텔레그램 메시지 전송 (재시도)
 # ================================
 def post_telegram(msg, retries=3, delay=2):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -41,7 +50,7 @@ def post_telegram(msg, retries=3, delay=2):
                 print("✅ 텔레그램 전송 성공")
                 return True
             else:
-                print(f"⚠️ 전송 실패: {resp.status_code}, {resp.text}")
+                print(f"⚠️ 전송 실패 {resp.status_code}: {resp.text}")
         except Exception as e:
             print(f"⚠️ 전송 예외: {e}")
         time.sleep(delay)
@@ -49,7 +58,7 @@ def post_telegram(msg, retries=3, delay=2):
     return False
 
 # ================================
-# 주식 분석 (골든크로스 / 상승수렴)
+# 주식 분석
 # ================================
 def analyze_stock(ticker, retries=2):
     for attempt in range(retries):
@@ -58,7 +67,6 @@ def analyze_stock(ticker, retries=2):
             if df is None or df.empty or len(df) < 35:
                 return None
 
-            # MultiIndex 컬럼 평탄화
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
@@ -70,18 +78,14 @@ def analyze_stock(ticker, retries=2):
             if last_price < 1500 or np.isnan(last_price):
                 return None
 
-            # MACD 계산
             c_ser = pd.Series(close)
             e12 = c_ser.ewm(span=12, adjust=False).mean()
             e26 = c_ser.ewm(span=26, adjust=False).mean()
             macd = e12 - e26
             signal = macd.ewm(span=9, adjust=False).mean()
 
-            # 최근 3일 내 골든크로스
-            is_after = any((macd.iloc[i] > signal.iloc[i] and macd.iloc[i-1] <= signal.iloc[i-1]) 
+            is_after = any((macd.iloc[i] > signal.iloc[i] and macd.iloc[i-1] <= signal.iloc[i-1])
                            for i in range(-1, -4, -1))
-
-            # 골든크로스 직전 수렴
             is_before = False
             if macd.iloc[-1] < signal.iloc[-1]:
                 gap_now = signal.iloc[-1] - macd.iloc[-1]
@@ -92,7 +96,6 @@ def analyze_stock(ticker, retries=2):
             if not (is_after or is_before):
                 return None
 
-            # 정배열 확인 (주가 > 20일 이동평균)
             sma20 = c_ser.rolling(20).mean().iloc[-1]
             if last_price < sma20:
                 return None
@@ -102,6 +105,7 @@ def analyze_stock(ticker, retries=2):
                 "price": int(last_price),
                 "status": "골든크로스" if is_after else "상승수렴"
             }
+
         except Exception as e:
             print(f"⚠️ {ticker} 분석 실패: {e}, 재시도 {attempt+1}/{retries}")
             time.sleep(1)
@@ -121,7 +125,6 @@ def main():
             found.append(res)
             print(f"🎯 포착: {t} ({res['status']})")
 
-        # 30개마다 1~2초 쉬어서 API 과부하 방지
         if i % 30 == 0:
             time.sleep(2)
 
@@ -133,5 +136,7 @@ def main():
     else:
         print("📭 포착된 종목 없음")
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()
