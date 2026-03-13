@@ -3,7 +3,7 @@ name: Stock
 
 on:
   schedule:
-    - cron: '30 23 * * *'  # KST 08:30
+    - cron: '30 06 * * *'  # KST 08:30
   workflow_dispatch:
 
 jobs:
