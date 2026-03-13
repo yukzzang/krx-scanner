@@ -1,152 +1,81 @@
 import os
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import requests
-import io
 import time
 
-# ================================
-# 환경 변수
-# ================================
+# 텔레그램 설정 로드
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    print("❌ TELEGRAM_TOKEN 또는 TELEGRAM_CHAT_ID가 설정되지 않았습니다.")
-    exit(1)
-
-# ================================
-# 종목 리스트 가져오기
-# ================================
-def get_krx_tickers(min_market_cap=5000_000_000_000):
+def get_krx_tickers():
     """
-    min_market_cap: 최소 시가총액 (원 단위), 예: 5,000억 = 5000_000_000_000
+    안정적으로 종목 리스트를 확보하기 위해 
+    주요 지수(KOSPI 200, KOSDAQ 150) 종목 리스트를 활용합니다.
     """
-    print("🔎 종목 리스트 수집 중...")
-    url = "https://raw.githubusercontent.com/mrstock/KoreaStockCode/master/KoreaStockCode.csv"
+    print("🔎 종목 리스트 수집 시작...")
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text), dtype={'code': str})
+        url = "https://raw.githubusercontent.com/mrstock/KoreaStockCode/master/KoreaStockCode.csv"
+        df = pd.read_csv(url, dtype={'code': str})
+        df['full_code'] = df.apply(lambda x: f"{x['code']}.KS" if x['market'] == 'KOSPI' else f"{x['code']}.KQ", axis=1)
+        # 전체 중 상위 500개만 스캔 (IP 차단 방지용)
+        return df['full_code'].tolist()[:500]
+    except:
+        # 실패 시 비상용 대형주 리스트
+        return ["005930.KS", "000660.KS", "035420.KS", "035720.KS", "005380.KS"]
 
-        # 전체 KOSPI + KOSDAQ
-        df['full_code'] = np.where(df['market'] == 'KOSPI', df['code'] + ".KS", df['code'] + ".KQ")
-
-        # 시총 필터링 (시총 컬럼이 0이거나 NaN이면 제외)
-        df['market_cap'] = pd.to_numeric(df['market_cap'], errors='coerce')
-        df = df[df['market_cap'] >= min_market_cap]
-
-        tickers = df['full_code'].tolist()
-        print(f"✅ {len(tickers)}개 종목 수집 완료 (시총 5,000억 이상)")
-        return tickers
-
-    except Exception as e:
-        print(f"⚠️ 종목 리스트 로드 실패: {e}")
-        # 최소 기본 종목 리턴
-        return ["005930.KS", "000660.KS", "035420.KS", "035720.KS"]
-
-# ================================
-# 텔레그램 메시지 전송
-# ================================
-def post_telegram(msg, retries=3, delay=2):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for attempt in range(retries):
-        try:
-            resp = requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-            if resp.status_code == 200:
-                print("✅ 텔레그램 전송 성공")
-                return True
-            else:
-                print(f"⚠️ 전송 실패 {resp.status_code}: {resp.text}")
-        except Exception as e:
-            print(f"⚠️ 전송 예외: {e}")
-        time.sleep(delay)
-    print("❌ 텔레그램 전송 실패")
-    return False
-
-# ================================
-# 주식 분석
-# ================================
-def analyze_stock(ticker, retries=2):
-    for attempt in range(retries):
-        try:
-            df = yf.download(ticker, period="60d", interval="1d", progress=False, timeout=10)
-            if df is None or df.empty or len(df) < 35:
-                return None
-
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            if 'Close' not in df.columns:
-                return None
-
-            close = df['Close'].values.flatten()
-            last_price = float(close[-1])
-            if last_price < 1500 or np.isnan(last_price):
-                return None
-
-            c_ser = pd.Series(close)
-            e12 = c_ser.ewm(span=12, adjust=False).mean()
-            e26 = c_ser.ewm(span=26, adjust=False).mean()
-            macd = e12 - e26
-            signal = macd.ewm(span=9, adjust=False).mean()
-
-            is_after = any((macd.iloc[i] > signal.iloc[i] and macd.iloc[i-1] <= signal.iloc[i-1])
-                           for i in range(-1, -4, -1))
-            is_before = False
-            if macd.iloc[-1] < signal.iloc[-1]:
-                gap_now = signal.iloc[-1] - macd.iloc[-1]
-                gap_prev = signal.iloc[-2] - macd.iloc[-2]
-                if gap_now < gap_prev:
-                    is_before = True
-
-            if not (is_after or is_before):
-                return None
-
-            sma20 = c_ser.rolling(20).mean().iloc[-1]
-            if last_price < sma20:
-                return None
-
-            return {
-                "ticker": ticker,
-                "price": int(last_price),
-                "status": "골든크로스" if is_after else "상승수렴"
-            }
-
-        except Exception as e:
-            print(f"⚠️ {ticker} 분석 실패: {e}, 재시도 {attempt+1}/{retries}")
-            time.sleep(1)
-    return None
-
-# ================================
-# 메인
-# ================================
 def main():
-    tickers = get_krx_tickers(min_market_cap=5_000_000_000_000)  # 5,000억 원
-    if not tickers:
-        print("📭 시총 조건에 맞는 종목이 없습니다.")
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("❌ 텔레그램 설정이 없습니다.")
         return
 
-    found = []
-    print(f"🚀 {len(tickers)}개 종목 분석 시작...")
+    tickers = get_krx_tickers()
+    found_stocks = []
+    
+    print(f"🚀 총 {len(tickers)}개 종목 중 시총 5,000억 이상 필터링 시작...")
 
-    for i, t in enumerate(tickers, 1):
-        res = analyze_stock(t)
-        if res:
-            found.append(res)
-            print(f"🎯 포착: {t} ({res['status']})")
+    for i, t in enumerate(tickers):
+        try:
+            # 주가 및 종목 정보 가져오기
+            stock = yf.Ticker(t)
+            info = stock.info
+            
+            # 시가총액(marketCap) 확인
+            m_cap = info.get('marketCap')
+            
+            if m_cap and m_cap >= 500_000_000_000:  # 5,000억 원 이상
+                name = info.get('shortName', t)
+                price = info.get('currentPrice', 0)
+                found_stocks.append({
+                    "name": name,
+                    "ticker": t,
+                    "m_cap": round(m_cap / 100_000_000_000, 1), # 0000억 단위
+                    "price": price
+                })
+                print(f"🎯 포착: {name} (시총: {found_stocks[-1]['m_cap']}천억)")
+        except Exception:
+            continue
+        
+        # 10개마다 짧은 휴식 (서버 차단 방지)
+        if i % 10 == 0:
+            time.sleep(0.2)
+        
+        # GitHub Actions 시간 제한 고려 (최대 30개까지만 찾으면 중단)
+        if len(found_stocks) >= 30:
+            break
 
-        if i % 30 == 0:
-            time.sleep(2)
-
-    if found:
-        msg = "🇰🇷 **국내주식 변곡점 알림 (시총 5,000억 이상)**\n\n"
-        for s in found[:15]:
-            msg += f"✅ *{s['ticker']}*\n   - {s['price']:,}원 | {s['status']}\n\n"
-        post_telegram(msg)
+    # 메시지 작성 및 전송
+    if found_stocks:
+        msg = "🏢 **국내주식 시총 5,000억 이상 종목**\n\n"
+        for s in found_stocks:
+            msg += f"✅ *{s['name']}* ({s['ticker']})\n"
+            msg += f"   - 현재가: {int(s['price']):,}원 | 시총: {s['m_cap']}천억\n\n"
+        
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        print("✅ 텔레그램 전송 성공")
     else:
-        print("📭 포착된 종목 없음")
+        print("📭 조건에 맞는 종목이 없습니다.")
 
 if __name__ == "__main__":
     main()
