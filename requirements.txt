@@ -1,3 +1,4 @@
-yfinance
-requests
-pandas
+- name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance pandas numpy requests lxml cryptography
