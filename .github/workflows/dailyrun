@@ -2,18 +2,18 @@ name: Stock Scanner KR
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # 한국 시간 오후 5:00 실행 (장 마감 후)
-  workflow_dispatch:
+    - cron: '0 8 * * *'  # 한국 시간 오후 5:00 (장 마감 후)
+  workflow_dispatch:      # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # v3에서 v4로 업데이트
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # v4에서 v5로 업데이트
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -26,4 +26,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python script.py  # 파일명이 다르면 반드시 수정하세요
+        run: python script.py  # <--- 파일명이 script.py 인지 꼭 확인!
