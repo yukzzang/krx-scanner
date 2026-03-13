@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==================================
 # 환경 변수
 # ==================================
-TELEGRAM_TOKEN = 8617534523:AAE_xvNamAN3_HtCIoLnMB2lVh5jZ_00JOo("TELEGRAM_TOKEN","")
-CHAT_ID = 5087265480("TELEGRAM_CHAT_ID","")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN","")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
 MIN_SCORE = 60
 
 # ==================================
