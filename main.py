@@ -13,19 +13,26 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ==========================================
-# 📊 티커 수집 및 분리
+# 📊 티커 수집 및 시총 상위 N개
 # ==========================================
 def get_top_tickers(kospi_count=450, kosdaq_count=550):
-    """KOSPI/KOSDAQ 시총 상위 종목 가져오기"""
     today = datetime.today().strftime("%Y%m%d")
 
-    # 전체 티커와 이름
-    kospi_all = stock.get_market_cap(today, market="KOSPI")
-    kosdaq_all = stock.get_market_cap(today, market="KOSDAQ")
+    # KOSPI
+    kospi_all = stock.get_market_ohlcv_by_date(today, today, market="KOSPI")
+    kospi_all.reset_index(inplace=True)
+    kospi_all.rename(columns={'티커':'Ticker','종가':'Close','거래량':'Volume','거래대금':'Value'}, inplace=True)
+    kospi_all = kospi_all[['Ticker','Close','Volume','Value']].copy()
+    kospi_all['시가총액'] = kospi_all['Close'] * kospi_all['Volume']
+    kospi_top = kospi_all.sort_values(by='시가총액', ascending=False).head(kospi_count)
 
-    # 시총 기준 상위 N개 선택
-    kospi_top = kospi_all.sort_values(by="시가총액", ascending=False).head(kospi_count)
-    kosdaq_top = kosdaq_all.sort_values(by="시가총액", ascending=False).head(kosdaq_count)
+    # KOSDAQ
+    kosdaq_all = stock.get_market_ohlcv_by_date(today, today, market="KOSDAQ")
+    kosdaq_all.reset_index(inplace=True)
+    kosdaq_all.rename(columns={'티커':'Ticker','종가':'Close','거래량':'Volume','거래대금':'Value'}, inplace=True)
+    kosdaq_all = kosdaq_all[['Ticker','Close','Volume','Value']].copy()
+    kosdaq_all['시가총액'] = kosdaq_all['Close'] * kosdaq_all['Volume']
+    kosdaq_top = kosdaq_all.sort_values(by='시가총액', ascending=False).head(kosdaq_count)
 
     return kospi_top, kosdaq_top
 
@@ -77,8 +84,9 @@ def run():
     # ---------------------------
     # KOSPI → BREAKOUT 중심
     # ---------------------------
-    for ticker, row in kospi_top.iterrows():
-        name = row['종목명']
+    for idx, row in kospi_top.iterrows():
+        ticker = row['Ticker']
+        name = ticker  # pykrx에서는 종목명 조회 추가 가능
         try:
             df = stock.get_market_ohlcv_by_date(
                 (datetime.today() - timedelta(days=240)).strftime("%Y%m%d"),
@@ -104,10 +112,11 @@ def run():
             continue
 
     # ---------------------------
-    # KOSDAQ → EARLY 중심 (VCP + 수급)
+    # KOSDAQ → EARLY 중심
     # ---------------------------
-    for ticker, row in kosdaq_top.iterrows():
-        name = row['종목명']
+    for idx, row in kosdaq_top.iterrows():
+        ticker = row['Ticker']
+        name = ticker
         try:
             df = stock.get_market_ohlcv_by_date(
                 (datetime.today() - timedelta(days=240)).strftime("%Y%m%d"),
@@ -120,7 +129,6 @@ def run():
             inst, foreign = get_institution_flow(ticker)
             last_price = c.iloc[-1]
 
-            # EARLY 전략 조건
             if val.iloc[-1] >= 2_000_000_000 and last_price > s50.iloc[-1] and last_price > s20.iloc[-1]:
                 if val.iloc[-1] > val_ma20.iloc[-1]*1.3:
                     r1 = (h.iloc[-20:-10].max() - l.iloc[-20:-10].min()) / last_price
@@ -138,13 +146,12 @@ def run():
             continue
 
     # ---------------------------
-    # 정렬 및 메시지 전송
+    # 메시지 전송
     # ---------------------------
     early_hits = sorted(early_hits, key=lambda x: x['score'], reverse=True)[:10]
     breakout_hits = breakout_hits[:10]
 
     msg = f"🇰🇷 KRX 1000종목 스캐너 ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
-
     msg += "🟦 EARLY (VCP + 수급)\n"
     if not early_hits: msg += "포착된 종목 없음\n"
     else:
@@ -161,7 +168,7 @@ def run():
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg})
 
     print(msg)
-    print("✅ 스캔 및 전송 완료")
+    print("✅ 스캔 완료 및 텔레그램 전송 완료")
 
 if __name__ == "__main__":
     run()
