@@ -2,4 +2,7 @@ yfinance
 pandas
 numpy
 requests
-beautifulsoup4
+pykrx
+lxml
+html5lib
+
