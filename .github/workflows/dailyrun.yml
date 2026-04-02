@@ -2,26 +2,22 @@ name: Run KOSPI Strategy
 
 on:
   schedule:
-    # 한국 시간(KST) 15:00 = UTC 06:00
-    - cron: '0 06 * * 1-5'  
-  workflow_dispatch: # 수동 실행 버튼 추가
+    - cron: '10 06 * * 1-5' # 한국 시간 오후 3시 10분 실행 (UTC 06:10)
+  workflow_dispatch:
 
 jobs:
-  run_strategy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
+          python-version: '3.11'
       - name: Install dependencies
         run: |
-          pip install yfinance pandas numpy lxml requests html5lib
-
-      - name: Run strategy script
+          pip install -r requirements.txt
+      - name: Run script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
