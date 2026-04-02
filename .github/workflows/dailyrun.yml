@@ -1,9 +1,10 @@
-name: Run KOSPI/KOSDAQ Strategy
+name: Run KOSPI Strategy
 
 on:
   schedule:
-    - cron: '30 07 * * 1-5'  # 평일 18시 실행
-  workflow_dispatch:
+    # 한국 시간(KST) 15:00 = UTC 06:00
+    - cron: '0 06 * * 1-5'  
+  workflow_dispatch: # 수동 실행 버튼 추가
 
 jobs:
   run_strategy:
@@ -17,7 +18,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install yfinance pandas numpy lxml requests html5lib
 
       - name: Run strategy script
         env:
