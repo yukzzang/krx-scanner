@@ -13,37 +13,32 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ==========================================
-# 📊 티커 수집 및 시총 상위 N개
+# 📊 종목명 매핑 및 시총 상위 티커 수집
 # ==========================================
-def get_top_tickers(kospi_count=450, kosdaq_count=550):
+def get_top_tickers_with_names(kospi_count=400, kosdaq_count=600):
     today = datetime.today().strftime("%Y%m%d")
-
-    # KOSPI
-    kospi_all = stock.get_market_ohlcv_by_date(today, today, market="KOSPI")
-    kospi_all.reset_index(inplace=True)
-    kospi_all.rename(columns={'티커':'Ticker','종가':'Close','거래량':'Volume','거래대금':'Value'}, inplace=True)
-    kospi_all = kospi_all[['Ticker','Close','Volume','Value']].copy()
-    kospi_all['시가총액'] = kospi_all['Close'] * kospi_all['Volume']
-    kospi_top = kospi_all.sort_values(by='시가총액', ascending=False).head(kospi_count)
-
-    # KOSDAQ
-    kosdaq_all = stock.get_market_ohlcv_by_date(today, today, market="KOSDAQ")
-    kosdaq_all.reset_index(inplace=True)
-    kosdaq_all.rename(columns={'티커':'Ticker','종가':'Close','거래량':'Volume','거래대금':'Value'}, inplace=True)
-    kosdaq_all = kosdaq_all[['Ticker','Close','Volume','Value']].copy()
-    kosdaq_all['시가총액'] = kosdaq_all['Close'] * kosdaq_all['Volume']
-    kosdaq_top = kosdaq_all.sort_values(by='시가총액', ascending=False).head(kosdaq_count)
-
-    return kospi_top, kosdaq_top
+    
+    # KOSPI 시총 상위
+    df_kospi = stock.get_market_cap(today, market="KOSPI")
+    kospi_top = df_kospi.sort_values(by='시가총액', ascending=False).head(kospi_count).index.tolist()
+    
+    # KOSDAQ 시총 상위
+    df_kosdaq = stock.get_market_cap(today, market="KOSDAQ")
+    kosdaq_top = df_kosdaq.sort_values(by='시가총액', ascending=False).head(kosdaq_count).index.tolist()
+    
+    # 종목명 매핑 딕셔너리
+    all_names = {**stock.get_market_ticker_and_name("KOSPI"), **stock.get_market_ticker_and_name("KOSDAQ")}
+    
+    return kospi_top, kosdaq_top, all_names
 
 # ==========================================
-# 📈 지표 계산
+# 📈 지표 계산 (Vectorized)
 # ==========================================
 def compute_indicators(df):
     close = df['종가'].astype(float)
     high = df['고가'].astype(float)
     low = df['저가'].astype(float)
-    open_ = df['시가'].astype(float)
+    opened = df['시가'].astype(float)
     volume = df['거래량'].astype(float)
 
     value = close * volume
@@ -56,119 +51,79 @@ def compute_indicators(df):
     vol_ma20 = volume.rolling(20).mean()
     val_ma20 = value.rolling(20).mean()
 
-    return close, high, low, open_, volume, value, sma20, sma50, bb_width, adr, vol_ma20, val_ma20
+    return close, high, low, opened, volume, value, sma20, sma50, bb_width, adr, vol_ma20, val_ma20
 
-# ==========================================
-# 📊 기관/외인 수급
-# ==========================================
 def get_institution_flow(ticker):
     end_date = datetime.today().strftime("%Y%m%d")
-    start_date = (datetime.today() - timedelta(days=12)).strftime("%Y%m%d")
-    df = stock.get_market_trading_value_by_date(start_date, end_date, ticker)
-    if df.empty:
-        return 0, 0
-    recent = df.tail(5)
-    inst = recent['기관합계'].sum()
-    foreign = recent['외국인합계'].sum()
-    return inst, foreign
+    start_date = (datetime.today() - timedelta(days=10)).strftime("%Y%m%d")
+    try:
+        df = stock.get_market_trading_value_by_date(start_date, end_date, ticker)
+        if df.empty: return 0, 0
+        recent = df.tail(5)
+        return recent['기관합계'].sum(), recent['외국인합계'].sum()
+    except: return 0, 0
 
 # ==========================================
 # 🚀 메인 스캐너
 # ==========================================
 def run():
-    print(f"🚀 스캐너 실행: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    kospi_top, kosdaq_top = get_top_tickers()
+    print(f"🚀 스캐너 가동: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    kospi_top, kosdaq_top, name_map = get_top_tickers_with_names()
 
     early_hits, breakout_hits = [], []
+    start_date = (datetime.today() - timedelta(days=300)).strftime("%Y%m%d")
+    end_date = datetime.today().strftime("%Y%m%d")
 
-    # ---------------------------
-    # KOSPI → BREAKOUT 중심
-    # ---------------------------
-    for idx, row in kospi_top.iterrows():
-        ticker = row['Ticker']
-        name = ticker  # pykrx에서는 종목명 조회 추가 가능
-        try:
-            df = stock.get_market_ohlcv_by_date(
-                (datetime.today() - timedelta(days=240)).strftime("%Y%m%d"),
-                datetime.today().strftime("%Y%m%d"),
-                ticker
-            )
-            if df.empty or len(df) < 50: continue
+    # [KOSPI & KOSDAQ 통합 루프]
+    for market_type, tickers in [("KOSPI", kospi_top), ("KOSDAQ", kosdaq_top)]:
+        for ticker in tickers:
+            try:
+                name = name_map.get(ticker, ticker)
+                df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
+                if df.empty or len(df) < 60: continue
 
-            c, h, l, o, v, val, s20, s50, bb_w, adr, v_ma20, val_ma20 = compute_indicators(df)
-            inst, foreign = get_institution_flow(ticker)
+                c, h, l, o, v, val, s20, s50, bb_w, adr, v_ma20, val_ma20 = compute_indicators(df)
+                inst, foreign = get_institution_flow(ticker)
 
-            last_price = c.iloc[-1]
-            pivot = h.iloc[-10:-1].max()
+                last_c = c.iloc[-1]
+                
+                # --- 🟥 BREAKOUT 로직 (코스피 위주) ---
+                if market_type == "KOSPI":
+                    pivot = h.iloc[-10:-1].max()
+                    if last_c > pivot * 1.01 and v.iloc[-1] > v_ma20.iloc[-1]*1.5 and inst > 500_000_000:
+                        entry = int(last_c)
+                        stop = int(l.iloc[-5:].min() * 0.98)
+                        target = int(entry + (entry - stop)*2)
+                        breakout_hits.append({"name": name, "entry": entry, "target": target, "stop": stop})
 
-            if last_price > pivot * 1.01 and v.iloc[-1] > v_ma20.iloc[-1]*1.5 and val.iloc[-1] > val_ma20.iloc[-1]*1.5 and inst > 500_000_000:
-                entry = int(pivot * 1.01)
-                stop = int(l.iloc[-5:].min() * 0.98)
-                target = int(entry + (entry - stop)*2)
-                breakout_hits.append({"name": name, "entry": entry, "target": target, "stop": stop})
+                # --- 🟦 EARLY 로직 (코스닥 위주) ---
+                if market_type == "KOSDAQ":
+                    if val.iloc[-1] >= 2_000_000_000 and last_c > s50.iloc[-1]:
+                        r1 = (h.iloc[-20:-10].max() - l.iloc[-20:-10].min()) / last_c
+                        r2 = (h.iloc[-10:-3].max() - l.iloc[-10:-3].min()) / last_c
+                        if r2 < r1 and (inst > 300_000_000 or foreign > 300_000_000):
+                            score = 40 if bb_w.iloc[-1] < 0.1 else 0
+                            if inst > 0: score += 30
+                            if foreign > 0: score += 30
+                            if score >= 60:
+                                early_hits.append({"name": name, "price": int(last_c), "score": score, "inst": int(inst//1_000_000), "foreign": int(foreign//1_000_000)})
 
-            time.sleep(0.03)
-        except:
-            continue
+                time.sleep(0.04) # API 안정성
+            except: continue
 
-    # ---------------------------
-    # KOSDAQ → EARLY 중심
-    # ---------------------------
-    for idx, row in kosdaq_top.iterrows():
-        ticker = row['Ticker']
-        name = ticker
-        try:
-            df = stock.get_market_ohlcv_by_date(
-                (datetime.today() - timedelta(days=240)).strftime("%Y%m%d"),
-                datetime.today().strftime("%Y%m%d"),
-                ticker
-            )
-            if df.empty or len(df) < 50: continue
-
-            c, h, l, o, v, val, s20, s50, bb_w, adr, v_ma20, val_ma20 = compute_indicators(df)
-            inst, foreign = get_institution_flow(ticker)
-            last_price = c.iloc[-1]
-
-            if val.iloc[-1] >= 2_000_000_000 and last_price > s50.iloc[-1] and last_price > s20.iloc[-1]:
-                if val.iloc[-1] > val_ma20.iloc[-1]*1.3:
-                    r1 = (h.iloc[-20:-10].max() - l.iloc[-20:-10].min()) / last_price
-                    r2 = (h.iloc[-10:-3].max() - l.iloc[-10:-3].min()) / last_price
-                    if r2 < r1 and (inst > 500_000_000 or foreign > 500_000_000):
-                        score = 0
-                        if inst > 0: score += 30
-                        if foreign > 0: score += 30
-                        if bb_w.iloc[-1] < 0.1: score += 40
-                        if score >= 60:
-                            early_hits.append({"name": name, "price": int(last_price), "score": score, "inst": int(inst//1_000_000), "foreign": int(foreign//1_000_000)})
-
-            time.sleep(0.03)
-        except:
-            continue
-
-    # ---------------------------
     # 메시지 전송
-    # ---------------------------
     early_hits = sorted(early_hits, key=lambda x: x['score'], reverse=True)[:10]
     breakout_hits = breakout_hits[:10]
 
-    msg = f"🇰🇷 KRX 1000종목 스캐너 ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
-    msg += "🟦 EARLY (VCP + 수급)\n"
-    if not early_hits: msg += "포착된 종목 없음\n"
-    else:
-        for e in early_hits:
-            msg += f"✨ {e['name']} | {e['price']:,}원\n(기관:{e['inst']}M 외인:{e['foreign']}M)\n\n"
-
-    msg += "🟥 BREAKOUT (강력 돌파)\n"
-    if not breakout_hits: msg += "포착된 종목 없음\n"
-    else:
-        for b in breakout_hits:
-            msg += f"🔥 {b['name']}\n진입:{b['entry']:,} 목표:{b['target']:,}\n손절:{b['stop']:,}\n\n"
+    msg = f"🇰🇷 KRX 1000종목 스캔 ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
+    msg += "🟦 EARLY (VCP+수급)\n"
+    msg += "\n".join([f"✨ {e['name']} | {e['price']:,}원 (기:{e['inst']}M 외:{e['foreign']}M)" for e in early_hits]) if early_hits else "포착 없음"
+    msg += "\n\n🟥 BREAKOUT (돌파)\n"
+    msg += "\n".join([f"🔥 {b['name']} | 진입:{b['entry']:,} 목:{b['target']:,}" for b in breakout_hits]) if breakout_hits else "포착 없음"
 
     if TELEGRAM_TOKEN and CHAT_ID:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg})
-
     print(msg)
-    print("✅ 스캔 완료 및 텔레그램 전송 완료")
 
 if __name__ == "__main__":
     run()
