@@ -2,107 +2,188 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import time
-
-# ❗ 중요: import schedule 줄이 있으면 에러 납니다. 삭제하세요.
+from pykrx import stock
 
 # ==========================================
-# 🔧 환경 변수 (GitHub Secrets)
+# 🔧 환경 변수 (GitHub Secrets 설정 필요)
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-def get_kr_tickers():
-    tickers_info = []
+# ==========================================
+# 📊 종목 데이터 수집
+# ==========================================
+def get_all_tickers_with_names():
+    """코스피/코스닥 전체 종목 코드와 이름을 가져옵니다."""
     try:
-        # KOSPI 200 구성 종목
-        url = "https://en.wikipedia.org/wiki/KOSPI_200"
-        df = pd.read_html(url)[1]
-        for _, row in df.iterrows():
-            code = str(row['Ticker']).zfill(6) + ".KS"
-            name = row['Component']
-            tickers_info.append({'ticker': code, 'name': name})
-    except:
-        tickers_info = [{'ticker': '005930.KS', 'name': '삼성전자'}]
-    return tickers_info
+        kospi = stock.get_market_ticker_and_name(market="KOSPI")
+        kosdaq = stock.get_market_ticker_and_name(market="KOSDAQ")
+        return {**kospi, **kosdaq}
+    except Exception as e:
+        print(f"티커 수집 에러: {e}")
+        return {"005930": "삼성전자"}
 
+def get_institution_flow(ticker):
+    """최근 5거래일간의 기관 및 외국인 누적 순매수 대금을 가져옵니다."""
+    try:
+        end_date = datetime.today().strftime("%Y%m%d")
+        start_date = (datetime.today() - timedelta(days=12)).strftime("%Y%m%d") # 주말 포함 넉넉히 조회
+
+        df = stock.get_market_trading_value_by_date(start_date, end_date, ticker)
+        if df.empty: return 0, 0
+
+        # 최근 5거래일 데이터만 합산
+        recent_df = df.tail(5)
+        inst = recent_df['기관합계'].sum()
+        foreign = recent_df['외국인합계'].sum()
+
+        return inst, foreign
+    except:
+        return 0, 0
+
+# ==========================================
+# 📈 기술적 지표 계산
+# ==========================================
 def compute_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    
+
     close = df['Close'].astype(float)
     high = df['High'].astype(float)
     low = df['Low'].astype(float)
     volume = df['Volume'].astype(float)
-    
-    value = close * volume 
+    opened = df['Open'].astype(float)
+
+    value = close * volume
     sma20 = close.rolling(20).mean()
     sma50 = close.rolling(50).mean()
     std20 = close.rolling(20).std()
-    bb_width = ((sma20 + std20 * 2) - (sma20 - std20 * 2)) / sma20
+    
+    # 변동성 압축 지표 (BB Width)
+    bb_width = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20
+    
+    # 일평균 변동률 (ADR)
     atr = (high - low).rolling(14).mean()
     adr = (atr / close) * 100
-    return close, high, low, volume, value, sma20, sma50, bb_width, atr, adr
-
-def compute_breakout(close, sma50, bb_width, adr, value):
-    if len(close) < 50: return 0
-    # 국장 기준: 당일 거래대금 50억 이상만 (필요시 조절)
-    if value.iloc[-1] < 5_000_000_000: return 0
     
-    last = close.iloc[-1]
-    is_squeeze = bb_width.iloc[-1] < bb_width.rolling(30).min().iloc[-1] * 1.1
-    if not is_squeeze or last < sma50.iloc[-1]: return 0
+    vol_ma20 = volume.rolling(20).mean()
+    val_ma20 = value.rolling(20).mean()
 
-    score = 30
-    if bb_width.iloc[-1] < 0.06: score += 20
-    if adr.iloc[-1] < 4: score += 10
-    if last > close.rolling(50).max().iloc[-1] * 0.95: score += 20
-    return score
+    return close, high, low, volume, opened, value, sma20, sma50, bb_width, adr, vol_ma20, val_ma20
 
 # ==========================================
-# 🚀 실행 로직 (일회성 실행)
+# 🚀 메인 스캐너 실행
 # ==========================================
-def run_scanner():
-    print(f"🚀 스캔 시작: {datetime.now()}")
-    tickers_data = get_kr_tickers()
-    results = []
+def run_strategy():
+    print(f"🚀 스캐너 가동: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 상위 100개 종목 스캔
-    for item in tickers_data[:100]: 
-        t, name = item['ticker'], item['name']
+    ticker_map = get_all_tickers_with_names()
+    tickers = list(ticker_map.keys())
+
+    early_hits, breakout_hits = [], []
+
+    # 성능과 API 안정성을 위해 상위 300개 종목 우선 스캔 (시총 순)
+    for t in tickers[:300]:
+        name = ticker_map[t]
         try:
-            df = yf.download(t, period="8mo", progress=False, threads=False)
+            # yfinance 호환 티커 설정
+            yf_ticker = t + ".KS"
+            df = yf.download(yf_ticker, period="8mo", progress=False, threads=False)
+            if df.empty:
+                yf_ticker = t + ".KQ"
+                df = yf.download(yf_ticker, period="8mo", progress=False, threads=False)
+            
             if df.empty or len(df) < 60: continue
 
-            c, h, l, v, val, s20, s50, bb_w, atr, adr = compute_indicators(df)
-            score = compute_breakout(c, s50, bb_w, adr, val)
+            # 지표 계산
+            c, h, l, v, o, val, s20, s50, bb_w, adr, v_ma20, val_ma20 = compute_indicators(df)
+            inst, foreign = get_institution_flow(t)
             
-            if score > 0:
-                results.append({
-                    "name": name, "ticker": t, "score": score,
-                    "entry": int(h.iloc[-5:].max() * 1.005),
-                    "target": int(h.iloc[-5:].max() * 1.15),
-                    "stop": int(c.iloc[-1] * 0.94)
-                })
-            time.sleep(0.1)
-        except: continue
+            last_price = c.iloc[-1]
 
-    results = sorted(results, key=lambda x: x['score'], reverse=True)[:10]
-    
-    if not results:
-        msg = f"📩 [{datetime.now().strftime('%m/%d')}] 조건 만족 종목 없음"
+            # ------------------------------------------
+            # 🟦 EARLY 전략 (VCP + 수급)
+            # ------------------------------------------
+            # 1. 기본 필터: 거래대금 20억 이상 & 50일선 위 & 20일선 위
+            if val.iloc[-1] >= 2_000_000_000 and last_price > s50.iloc[-1] and last_price > s20.iloc[-1]:
+                
+                # 2. 거래대금 증가 (평균 대비 1.3배)
+                if val.iloc[-1] > val_ma20.iloc[-1] * 1.3:
+                    
+                    # 3. VCP 패턴 (변동성 축소 확인)
+                    r1 = (h.iloc[-20:-10].max() - l.iloc[-20:-10].min()) / last_price
+                    r2 = (h.iloc[-10:-3].max() - l.iloc[-10:-3].min()) / last_price
+
+                    if r2 < r1:
+                        # 4. 강한 수급 (기관 또는 외인 5억 이상 매수)
+                        if (inst > 500_000_000) or (foreign > 500_000_000):
+                            score = 0
+                            if inst > 0: score += 30
+                            if foreign > 0: score += 30
+                            if bb_w.iloc[-1] < 0.1: score += 40
+
+                            if score >= 60:
+                                early_hits.append({
+                                    "name": name, "price": int(last_price), "score": score,
+                                    "inst": int(inst // 1_000_000), "foreign": int(foreign // 1_000_000)
+                                })
+
+            # ------------------------------------------
+            # 🟥 BREAKOUT 전략 (전고점 돌파 + 기관수급)
+            # ------------------------------------------
+            pivot = h.iloc[-10:-1].max() # 최근 10일간의 고점
+
+            # 1. 돌파 여부 확인 (전고점 +1% 돌파 & 양봉 확인)
+            if last_price > pivot * 1.01 and last_price > o.iloc[-1]:
+                
+                # 2. 거래량 및 거래대금 폭발 (평균 대비 1.5배)
+                if v.iloc[-1] > v_ma20.iloc[-1] * 1.5 and val.iloc[-1] > val_ma20.iloc[-1] * 1.5:
+                    
+                    # 3. 기관 수급 필수 (5억 이상)
+                    if inst > 500_000_000:
+                        entry = int(pivot * 1.01)
+                        stop = int(l.iloc[-5:].min() * 0.98)
+                        target = int(entry + (entry - stop) * 2)
+                        
+                        breakout_hits.append({
+                            "name": name, "entry": entry, "target": target, "stop": stop
+                        })
+
+            time.sleep(0.08) # API 부하 방지
+        except:
+            continue
+
+    # 결과 정렬 및 출력
+    early_hits = sorted(early_hits, key=lambda x: x['score'], reverse=True)[:10]
+    breakout_hits = breakout_hits[:10]
+
+    # 📩 텔레그램 메시지 생성
+    msg = f"🇰🇷 국장 수급/차트 스캐너 ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
+
+    msg += "🟦 EARLY (에너지 응축)\n"
+    if not early_hits:
+        msg += "포착된 종목 없음\n"
     else:
-        msg = f"🔥 국장 TOP10 ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
-        for r in results:
-            msg += f"✨ {r['name']} ({r['ticker']})\n"
-            msg += f"추천가: {r['entry']:,}원 | 목표: {r['target']:,}원\n\n"
+        for e in early_hits:
+            msg += f"✨ {e['name']} | {e['price']:,}원\n(기관:{e['inst']}M 외인:{e['foreign']}M)\n\n"
 
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": msg})
-    print("✅ 전송 완료")
+    msg += "🟥 BREAKOUT (강력 돌파)\n"
+    if not breakout_hits:
+        msg += "포착된 종목 없음\n"
+    else:
+        for b in breakout_hits:
+            msg += f"🔥 {b['name']}\n진입:{b['entry']:,} 목표:{b['target']:,}\n손절:{b['stop']:,}\n\n"
+
+    # 메시지 전송
+    if TELEGRAM_TOKEN and CHAT_ID:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": msg})
+    
+    print(msg)
+    print("✅ 스캔 및 전송 완료")
 
 if __name__ == "__main__":
-    # ❗ 여기도 schedule 관련 함수 호출을 지우고 run_scanner()만 남깁니다.
-    run_scanner()
+    run_strategy()
