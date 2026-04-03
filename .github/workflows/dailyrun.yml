@@ -2,7 +2,7 @@ name: Run KOSPI Strategy
 
 on:
   schedule:
-    - cron: '10 06 * * 1-5' # 한국 시간 오후 3시 10분 실행 (UTC 06:10)
+    - cron: '30 06 * * 1-5' # 한국 시간 오후 3시 30분
   workflow_dispatch:
 
 jobs:
@@ -10,13 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+
       - name: Run script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
