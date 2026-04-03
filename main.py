@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import time
-from pykrx import stock
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # 🔧 환경 변수
@@ -17,201 +18,165 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # ==========================================
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(f"\n📢 [로컬 출력]\n{message}")
+        print(message)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        res = requests.post(url, json={
+        requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": message,
             "parse_mode": "HTML"
         }, timeout=10)
-
-        if res.status_code != 200:
-            print(f"❌ 텔레그램 오류: {res.text}")
-
     except Exception as e:
-        print(f"❌ 텔레그램 전송 실패: {e}")
-
-# ==========================================
-# 📅 최근 영업일
-# ==========================================
-def get_recent_business_day():
-    for i in range(0, 10):
-        d = (datetime.today() - timedelta(days=i)).strftime("%Y%m%d")
-        try:
-            df = stock.get_market_cap(d)
-            if df is not None and not df.empty:
-                return d
-        except:
-            continue
-    return (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
-
-# ==========================================
-# 📡 시장 데이터 로딩 (재시도 + fallback)
-# ==========================================
-def load_market_tickers(date, max_retry=5):
-    for attempt in range(max_retry):
-        try:
-            kospi_df = stock.get_market_cap(date, market="KOSPI")
-            kosdaq_df = stock.get_market_cap(date, market="KOSDAQ")
-
-            if (kospi_df is not None and not kospi_df.empty and '시가총액' in kospi_df.columns and
-                kosdaq_df is not None and not kosdaq_df.empty and '시가총액' in kosdaq_df.columns):
-
-                print("✅ 시총 데이터 로딩 성공")
-                kospi = kospi_df.sort_values('시가총액', ascending=False).head(300).index.tolist()
-                kosdaq = kosdaq_df.sort_values('시가총액', ascending=False).head(400).index.tolist()
-                return kospi + kosdaq
-
-        except Exception as e:
-            print(f"⚠️ 시총 로딩 실패 ({attempt+1}/{max_retry}): {e}")
-
-        time.sleep(10)
-
-    # 🔥 fallback (무조건 실행 보장)
-    print("⚠️ 시총 실패 → 티커 fallback 사용")
-
-    try:
-        kospi = stock.get_market_ticker_list(date, market="KOSPI")[:300]
-        kosdaq = stock.get_market_ticker_list(date, market="KOSDAQ")[:400]
-        return kospi + kosdaq
-    except Exception as e:
-        print(f"❌ fallback도 실패: {e}")
-        return []
+        print("텔레그램 오류:", e)
 
 # ==========================================
 # 📊 점수 계산
 # ==========================================
-def calculate_score(close, vol):
-    score = 0
+def calculate_score(df):
+    close = df['Close']
+    vol = df['Volume']
+
+    if len(df) < 70:
+        return 0, None, None
+
     curr_close = close.iloc[-1]
 
-    avg_vol_20 = vol.iloc[-21:-1].mean() + 1e-9
-    vol_ratio = vol.iloc[-1] / avg_vol_20
+    avg_vol = vol.iloc[-21:-1].mean() + 1e-9
+    vol_ratio = vol.iloc[-1] / avg_vol
 
+    score = 0
+
+    # 거래량
     if 0.3 < vol_ratio < 0.7: score += 25
     elif 0.2 < vol_ratio < 1.0: score += 15
 
+    # 이평선
     ma5 = close.rolling(5).mean().iloc[-1]
     ma20 = close.rolling(20).mean().iloc[-1]
     ma60 = close.rolling(60).mean().iloc[-1]
+
     ma_gap = max(ma5, ma20, ma60) / min(ma5, ma20, ma60)
 
     if ma_gap < 1.03: score += 20
     elif ma_gap < 1.05: score += 10
 
+    # 추세
     if close.rolling(60).mean().iloc[-1] >= close.rolling(60).mean().iloc[-5]:
         score += 15
 
+    # 위치
     high_60 = close.iloc[-60:].max()
     if curr_close > high_60 * 0.85: score += 15
     elif curr_close > high_60 * 0.70: score += 10
 
-    range_10 = (close.iloc[-10:].max() - close.iloc[-10:].min()) / (curr_close + 1e-9)
+    # 변동성
+    range_10 = (close.iloc[-10:].max() - close.iloc[-10:].min()) / curr_close
     if range_10 < 0.05: score += 15
     elif range_10 < 0.08: score += 10
 
+    # 상승 압력
     if close.iloc[-1] >= close.iloc[-2] >= close.iloc[-3]:
         score += 10
 
-    return score
-
-# ==========================================
-# 📍 진입/손절
-# ==========================================
-def get_trade_levels(close):
+    # 진입/손절
     high = close.iloc[-10:].max()
     low = close.iloc[-10:].min()
-    return high * 1.005, low * 0.98
+
+    entry = high * 1.005
+    stop = low * 0.98
+
+    return score, entry, stop
 
 # ==========================================
-# 🚀 메인 실행
+# 🔍 개별 종목 분석
+# ==========================================
+def analyze_ticker(ticker):
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+
+        if df.empty:
+            return None
+
+        score, entry, stop = calculate_score(df)
+
+        close = df['Close'].iloc[-1]
+
+        # 돌파 직전
+        recent_high_5 = df['Close'].iloc[-5:].max()
+        is_breakout = close >= recent_high_5 * 0.98
+
+        return {
+            "ticker": ticker,
+            "price": close,
+            "score": score,
+            "entry": entry,
+            "stop": stop,
+            "breakout": is_breakout
+        }
+
+    except:
+        return None
+
+# ==========================================
+# 🚀 메인 스캐너
 # ==========================================
 def run_scanner():
-    print("🚀 스캐너 시작")
 
-    last_date = get_recent_business_day()
-    print(f"📅 기준일: {last_date}")
+    print("🚀 yfinance 병렬 스캐너 시작")
 
-    tickers = load_market_tickers(last_date)
+    # 👉 테스트용 (필요하면 확장 가능)
+    tickers = [
+        "005930.KS", "000660.KS", "035420.KS", "051910.KS",
+        "068270.KS", "207940.KS", "035720.KS",
+        "091990.KQ", "247540.KQ", "263750.KQ"
+    ]
 
-    if not tickers:
-        send_telegram("❌ 종목 리스트 로딩 실패 (완전 실패)")
-        return
+    A, B, C = [], [], []
 
-    start_date = (datetime.strptime(last_date, "%Y%m%d") - timedelta(days=150)).strftime("%Y%m%d")
+    # 병렬 처리
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(analyze_ticker, t) for t in tickers]
 
-    names = {**stock.get_market_ticker_name("KOSPI"),
-             **stock.get_market_ticker_name("KOSDAQ")}
-
-    A_list, B_list, C_list = [], [], []
-
-    print(f"🔍 {len(tickers)}개 종목 분석 중...")
-
-    for ticker in tickers:
-        try:
-            df = stock.get_market_ohlcv_by_date(start_date, last_date, ticker)
-            if len(df) < 75:
+        for future in as_completed(futures):
+            result = future.result()
+            if not result:
                 continue
 
-            close = df['종가'].astype(float)
-            vol = df['거래량'].astype(float)
+            if result["score"] >= 75 and result["breakout"]:
+                A.append(result)
+            elif result["score"] >= 65:
+                B.append(result)
+            elif result["score"] >= 55:
+                C.append(result)
 
-            score = calculate_score(close, vol)
-            entry, stop = get_trade_levels(close)
-
-            recent_high_5 = close.iloc[-5:].max()
-            is_near_breakout = close.iloc[-1] >= recent_high_5 * 0.98
-
-            item = {
-                "name": names.get(ticker, ticker),
-                "price": close.iloc[-1],
-                "score": score,
-                "entry": entry,
-                "stop": stop
-            }
-
-            if score >= 75 and is_near_breakout:
-                A_list.append(item)
-            elif score >= 65:
-                B_list.append(item)
-            elif score >= 55:
-                C_list.append(item)
-
-            time.sleep(0.02)
-
-        except Exception:
-            continue
+    # 정렬
+    A = sorted(A, key=lambda x: x['score'], reverse=True)
+    B = sorted(B, key=lambda x: x['score'], reverse=True)
+    C = sorted(C, key=lambda x: x['score'], reverse=True)
 
     # ==========================================
-    # 📢 결과 메시지
+    # 📢 결과
     # ==========================================
-    msg = f"<b>📊 [등급별 매집 리포트]</b>\n📅 {last_date}\n"
-    msg += "━━━━━━━━━━━━━━━━━━\n\n"
+    msg = "<b>📊 [yfinance 매집 스캐너]</b>\n\n"
 
-    msg += "<b>🔥 A급 (즉시 매매)</b>\n"
-    if A_list:
-        for i in sorted(A_list, key=lambda x: x['score'], reverse=True)[:5]:
-            msg += f"• <b>{i['name']}</b> ({i['score']}점)\n"
-            msg += f"  현재: {int(i['price']):,} | 🚀 {int(i['entry']):,} / ⛔ {int(i['stop']):,}\n\n"
+    msg += "<b>🔥 A급</b>\n"
+    if A:
+        for i in A[:5]:
+            msg += f"{i['ticker']} ({i['score']})\n"
     else:
-        msg += "없음\n\n"
+        msg += "없음\n"
 
-    msg += "<b>👀 B급 (관찰)</b>\n"
-    msg += ", ".join([f"<b>{x['name']}</b>" for x in B_list[:8]]) if B_list else "없음"
-    msg += "\n\n"
+    msg += "\n<b>👀 B급</b>\n"
+    msg += ", ".join([x['ticker'] for x in B[:8]]) if B else "없음"
 
-    msg += "<b>🌱 C급 (매집)</b>\n"
-    msg += ", ".join([x['name'] for x in C_list[:10]]) if C_list else "없음"
-
-    if not A_list and not B_list and not C_list:
-        msg += "\n\n⚠️ 오늘은 조건 만족 종목이 없습니다."
+    msg += "\n\n<b>🌱 C급</b>\n"
+    msg += ", ".join([x['ticker'] for x in C[:10]]) if C else "없음"
 
     send_telegram(msg)
 
-    print(f"✅ 완료 | A:{len(A_list)} B:{len(B_list)} C:{len(C_list)}")
+    print("✅ 완료")
 
 # ==========================================
 # ▶ 실행
