@@ -5,7 +5,7 @@ from datetime import datetime
 import os
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import random
+from pykrx import stock
 
 # ==========================================
 # 🔧 텔레그램
@@ -28,27 +28,34 @@ def send_telegram(message):
         pass
 
 # ==========================================
-# 📊 티커 생성 (1000개)
+# 📊 티커 수집 (핵심 안정화)
 # ==========================================
 def get_tickers():
 
-    tickers = []
+    try:
+        tickers_k = stock.get_market_ticker_list(market="KOSPI")
+        tickers_q = stock.get_market_ticker_list(market="KOSDAQ")
 
-    # 코스피 범위
-    for i in range(100000, 200000):
-        tickers.append(f"{i}.KS")
+        tickers = []
 
-    # 코스닥 범위
-    for i in range(200000, 400000):
-        tickers.append(f"{i}.KQ")
+        for t in tickers_k[:500]:
+            tickers.append(f"{t}.KS")
 
-    # 랜덤 1000개 샘플링 (속도용)
-    return random.sample(tickers, 1000)
+        for t in tickers_q[:700]:
+            tickers.append(f"{t}.KQ")
+
+        print(f"📡 총 {len(tickers)}개 종목 로드 완료")
+        return tickers
+
+    except Exception as e:
+        print("❌ 티커 로딩 실패:", e)
+        return ["005930.KS"]
 
 # ==========================================
-# 📊 점수 계산
+# 📊 점수 계산 (완화 버전)
 # ==========================================
 def calculate_score(close, vol):
+
     if len(close) < 60:
         return 0, 0, 0
 
@@ -58,7 +65,7 @@ def calculate_score(close, vol):
     avg_vol = np.mean(vol[-21:-1]) + 1e-9
     v_ratio = vol[-1] / avg_vol
 
-    if 0.1 < v_ratio < 1.5: score += 25
+    if 0.1 < v_ratio < 1.8: score += 25
     elif v_ratio < 2.5: score += 15
 
     m5 = np.mean(close[-5:])
@@ -66,16 +73,18 @@ def calculate_score(close, vol):
     m60 = np.mean(close[-60:])
 
     gap = max(m5, m20, m60) / (min(m5, m20, m60) + 1e-9)
-    if gap < 1.05: score += 20
-    elif gap < 1.08: score += 10
+    if gap < 1.06: score += 20
+    elif gap < 1.10: score += 10
 
     if m60 >= np.mean(close[-65:-5]): score += 15
 
     h60 = np.max(close[-60:])
-    if curr > h60 * 0.70: score += 15
+    if curr > h60 * 0.65: score += 15
+    elif curr > h60 * 0.50: score += 10
 
     r10 = (np.max(close[-10:]) - np.min(close[-10:])) / curr
-    if r10 < 0.15: score += 15
+    if r10 < 0.18: score += 15
+    elif r10 < 0.30: score += 10
 
     if close[-1] >= close[-5]: score += 10
 
@@ -85,7 +94,7 @@ def calculate_score(close, vol):
     return score, entry, stop
 
 # ==========================================
-# 🔍 배치 다운로드
+# 🔥 배치 다운로드
 # ==========================================
 def fetch_batch(tickers):
     try:
@@ -105,7 +114,7 @@ def fetch_batch(tickers):
 # ==========================================
 def run_scanner():
 
-    print("🚀 yfinance ONLY 스캐너")
+    print("🚀 1200종목 실전 스캐너 시작")
 
     tickers = get_tickers()
 
@@ -135,27 +144,33 @@ def run_scanner():
                     curr = close[-1]
 
                     h5 = np.max(close[-5:])
-                    is_break = curr >= h5 * 0.93
+                    is_break = curr >= h5 * 0.92  # 돌파 완화
 
                     item = {"ticker": t, "score": score}
 
-                    if score >= 65 and is_break:
+                    if score >= 60 and is_break:
                         A.append(item)
-                    elif score >= 55:
+                    elif score >= 50:
                         B.append(item)
-                    elif score >= 45:
+                    elif score >= 40:
                         C.append(item)
 
                 except:
                     continue
 
-    msg = f"<b>📊 [완전 안정형 스캐너]</b>\n\n"
+    # 정렬
+    A.sort(key=lambda x: x['score'], reverse=True)
+    B.sort(key=lambda x: x['score'], reverse=True)
+    C.sort(key=lambda x: x['score'], reverse=True)
+
+    # 📢 결과
+    msg = f"<b>📊 [1200종목 실전 스캐너]</b>\n📅 {datetime.now().strftime('%Y-%m-%d')}\n\n"
 
     msg += "<b>🔥 A급</b>\n"
-    msg += "\n".join([x['ticker'] for x in A[:5]]) if A else "없음"
+    msg += "\n".join([x['ticker'] for x in A[:7]]) if A else "없음"
 
     msg += "\n\n<b>👀 B급</b>\n"
-    msg += ", ".join([x['ticker'] for x in B[:10]]) if B else "없음"
+    msg += ", ".join([x['ticker'] for x in B[:12]]) if B else "없음"
 
     msg += "\n\n<b>🌱 C급</b>\n"
     msg += ", ".join([x['ticker'] for x in C[:15]]) if C else "없음"
@@ -164,5 +179,6 @@ def run_scanner():
 
     print(f"✅ 완료 | A:{len(A)} B:{len(B)} C:{len(C)}")
 
+# ==========================================
 if __name__ == "__main__":
     run_scanner()
