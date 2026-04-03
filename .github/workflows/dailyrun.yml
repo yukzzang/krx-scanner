@@ -2,7 +2,7 @@ name: Run KOSPI Strategy
 
 on:
   schedule:
-    - cron: '40 06 * * 1-5' # 한국 시간 오후 3시 30분
+    - cron: '45 06 * * 1-5' # 한국 시간 오후 3시 30분
   workflow_dispatch:
 
 jobs:
