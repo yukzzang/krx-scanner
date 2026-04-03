@@ -6,7 +6,6 @@ import os
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pykrx import stock
-import time
 
 # ==========================================
 # 🔧 환경 변수
@@ -29,10 +28,25 @@ def send_telegram(message):
         print("텔레그램 오류:", e)
 
 # ==========================================
-# 📊 티커 수집 (1000개)
+# 📅 유효한 최근 영업일 찾기 (핵심)
+# ==========================================
+def get_valid_date():
+    for i in range(7):
+        d = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            df = stock.get_market_cap(d)
+            if not df.empty and '시가총액' in df.columns:
+                print(f"📅 사용 날짜: {d}")
+                return d
+        except:
+            continue
+    raise Exception("❌ 유효한 영업일 찾기 실패")
+
+# ==========================================
+# 📊 티커 수집 (1000개 안정)
 # ==========================================
 def get_tickers_info():
-    date = (datetime.now() - timedelta(days=2)).strftime("%Y%m%d")
+    date = get_valid_date()
 
     nm_k = stock.get_market_ticker_name("KOSPI")
     nm_q = stock.get_market_ticker_name("KOSDAQ")
@@ -40,6 +54,12 @@ def get_tickers_info():
 
     cap_k = stock.get_market_cap(date, market="KOSPI")
     cap_q = stock.get_market_cap(date, market="KOSDAQ")
+
+    # 🔥 안정성 체크
+    if cap_k.empty or '시가총액' not in cap_k.columns:
+        raise Exception("❌ KOSPI 데이터 오류")
+    if cap_q.empty or '시가총액' not in cap_q.columns:
+        raise Exception("❌ KOSDAQ 데이터 오류")
 
     list_k = cap_k.sort_values('시가총액', ascending=False).head(400).index.tolist()
     list_q = cap_q.sort_values('시가총액', ascending=False).head(600).index.tolist()
@@ -54,7 +74,7 @@ def get_tickers_info():
     return combined
 
 # ==========================================
-# 📊 점수 계산
+# 📊 점수 계산 (완화형)
 # ==========================================
 def calculate_score(close, vol):
     if len(close) < 60:
@@ -99,7 +119,7 @@ def calculate_score(close, vol):
 # ==========================================
 def fetch_batch(tickers):
     try:
-        data = yf.download(
+        return yf.download(
             tickers=tickers,
             period="6mo",
             interval="1d",
@@ -107,9 +127,7 @@ def fetch_batch(tickers):
             progress=False,
             threads=False
         )
-        return data
-    except Exception as e:
-        print("배치 실패:", e)
+    except:
         return None
 
 # ==========================================
@@ -128,7 +146,6 @@ def analyze_batch(batch_items):
     for item in batch_items:
         try:
             t = item['ticker']
-
             if t not in data:
                 continue
 
@@ -154,22 +171,21 @@ def analyze_batch(batch_items):
                 "stop": stop,
                 "breakout": is_break
             })
-
         except:
             continue
 
     return results
 
 # ==========================================
-# 🚀 메인
+# 🚀 메인 실행
 # ==========================================
 def run_scanner():
 
-    print("🚀 배치 스캐너 시작")
+    print("🚀 안정형 배치 스캐너 시작")
 
     items = get_tickers_info()
 
-    # 🔥 배치 쪼개기 (50개씩)
+    # 50개씩 나누기
     batch_size = 50
     batches = [items[i:i+batch_size] for i in range(0, len(items), batch_size)]
 
@@ -194,8 +210,8 @@ def run_scanner():
     B.sort(key=lambda x: x['score'], reverse=True)
     C.sort(key=lambda x: x['score'], reverse=True)
 
-    # 📢 리포트
-    msg = f"<b>📊 [배치 스캐너 결과]</b>\n📅 {datetime.now().strftime('%Y-%m-%d')}\n\n"
+    # 📢 결과 출력
+    msg = f"<b>📊 [안정형 매집 스캐너]</b>\n📅 {datetime.now().strftime('%Y-%m-%d')}\n\n"
 
     msg += "<b>🔥 A급</b>\n"
     msg += "\n".join([f"{x['name']} ({x['score']})" for x in A[:5]]) if A else "없음"
