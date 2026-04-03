@@ -74,9 +74,8 @@ def run():
     last_date = get_recent_business_day()
     print(f"📅 데이터 기준일: {last_date}")
     
-    all_names = {**stock.get_market_ticker_and_name("KOSPI"), **stock.get_market_ticker_and_name("KOSDAQ")}
-    kospi_top = stock.get_market_cap(last_date, market="KOSPI").sort_values(by='시가총액', ascending=False).head(400).index.tolist()
-    kosdaq_top = stock.get_market_cap(last_date, market="KOSDAQ").sort_values(by='시가총액', ascending=False).head(600).index.tolist()
+    all_names = {**stock.get_market_ticker_name("KOSPI"), **stock.get_market_ticker_name("KOSDAQ")}
+
 
     early_hits, breakout_hits = [], []
     start_search = (datetime.strptime(last_date, "%Y%m%d") - timedelta(days=300)).strftime("%Y%m%d")
