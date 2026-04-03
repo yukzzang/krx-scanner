@@ -29,13 +29,13 @@ def send_telegram(message):
         }, timeout=10)
 
         if res.status_code != 200:
-            print(f"❌ 텔레그램 응답 오류: {res.text}")
+            print(f"❌ 텔레그램 오류: {res.text}")
 
     except Exception as e:
         print(f"❌ 텔레그램 전송 실패: {e}")
 
 # ==========================================
-# 📅 최근 영업일 (강화)
+# 📅 최근 영업일
 # ==========================================
 def get_recent_business_day():
     for i in range(0, 10):
@@ -49,9 +49,9 @@ def get_recent_business_day():
     return (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
 
 # ==========================================
-# 📡 시장 데이터 로딩 (재시도 포함)
+# 📡 시장 데이터 로딩 (재시도 + fallback)
 # ==========================================
-def load_market_data(date, max_retry=3):
+def load_market_tickers(date, max_retry=5):
     for attempt in range(max_retry):
         try:
             kospi_df = stock.get_market_cap(date, market="KOSPI")
@@ -59,15 +59,27 @@ def load_market_data(date, max_retry=3):
 
             if (kospi_df is not None and not kospi_df.empty and '시가총액' in kospi_df.columns and
                 kosdaq_df is not None and not kosdaq_df.empty and '시가총액' in kosdaq_df.columns):
-                
-                return kospi_df, kosdaq_df
+
+                print("✅ 시총 데이터 로딩 성공")
+                kospi = kospi_df.sort_values('시가총액', ascending=False).head(300).index.tolist()
+                kosdaq = kosdaq_df.sort_values('시가총액', ascending=False).head(400).index.tolist()
+                return kospi + kosdaq
 
         except Exception as e:
-            print(f"⚠️ 시장 데이터 로딩 실패 (시도 {attempt+1}): {e}")
+            print(f"⚠️ 시총 로딩 실패 ({attempt+1}/{max_retry}): {e}")
 
-        time.sleep(5)  # 재시도 대기
+        time.sleep(10)
 
-    return None, None
+    # 🔥 fallback (무조건 실행 보장)
+    print("⚠️ 시총 실패 → 티커 fallback 사용")
+
+    try:
+        kospi = stock.get_market_ticker_list(date, market="KOSPI")[:300]
+        kosdaq = stock.get_market_ticker_list(date, market="KOSDAQ")[:400]
+        return kospi + kosdaq
+    except Exception as e:
+        print(f"❌ fallback도 실패: {e}")
+        return []
 
 # ==========================================
 # 📊 점수 계산
@@ -123,10 +135,10 @@ def run_scanner():
     last_date = get_recent_business_day()
     print(f"📅 기준일: {last_date}")
 
-    kospi_df, kosdaq_df = load_market_data(last_date)
+    tickers = load_market_tickers(last_date)
 
-    if kospi_df is None or kosdaq_df is None:
-        send_telegram("❌ 시장 데이터 로딩 실패 (재시도 후에도 실패)")
+    if not tickers:
+        send_telegram("❌ 종목 리스트 로딩 실패 (완전 실패)")
         return
 
     start_date = (datetime.strptime(last_date, "%Y%m%d") - timedelta(days=150)).strftime("%Y%m%d")
@@ -134,10 +146,9 @@ def run_scanner():
     names = {**stock.get_market_ticker_name("KOSPI"),
              **stock.get_market_ticker_name("KOSDAQ")}
 
-    tickers = kospi_df.sort_values('시가총액', ascending=False).head(300).index.tolist() + \
-              kosdaq_df.sort_values('시가총액', ascending=False).head(400).index.tolist()
-
     A_list, B_list, C_list = [], [], []
+
+    print(f"🔍 {len(tickers)}개 종목 분석 중...")
 
     for ticker in tickers:
         try:
@@ -175,7 +186,7 @@ def run_scanner():
             continue
 
     # ==========================================
-    # 📢 결과 메시지 (무조건 전송)
+    # 📢 결과 메시지
     # ==========================================
     msg = f"<b>📊 [등급별 매집 리포트]</b>\n📅 {last_date}\n"
     msg += "━━━━━━━━━━━━━━━━━━\n\n"
