@@ -14,172 +14,244 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# ==========================================
+# 📩 텔레그램
+# ==========================================
 def send_telegram(message):
-    print(f"\n[텔레그램 전송 시도...]\n{message}")
+    print(message)
+
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("❌ 토큰 또는 ID가 없습니다.")
+        print("❌ 텔레그램 설정 없음")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
     try:
-        res = requests.post(url, json={
+        requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": message,
             "parse_mode": "HTML"
-        }, timeout=15)
-        if res.status_code == 200:
-            print("✅ 텔레그램 전송 성공!")
-        else:
-            print(f"❌ 전송 실패: {res.text}")
+        }, timeout=10)
     except Exception as e:
-        print(f"❌ 연결 오류: {e}")
+        print(f"❌ 텔레그램 오류: {e}")
 
 # ==========================================
-# 📅 최근 영업일 찾기 (가장 중요)
+# 📅 종목 가져오기
 # ==========================================
 def get_valid_tickers():
-    # 오늘부터 거꾸로 10일간 뒤져서 데이터가 나오는 날을 찾음
     for i in range(0, 10):
-        target_date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-        try:
-            # 해당 날짜의 코스피 리스트가 있는지 확인
-            kospi_list = stock.get_market_ticker_list(target_date, market="KOSPI")
-            if len(kospi_list) > 100:
-                print(f"✅ 유효 날짜 발견: {target_date} (종목 수: {len(kospi_list)})")
-                
-                # 종목명 사전 만들기
-                nm_k = stock.get_market_ticker_name("KOSPI")
-                nm_q = stock.get_market_ticker_name("KOSDAQ")
-                ticker_to_name = {**nm_k, **nm_q}
+        date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
 
-                kosdaq_list = stock.get_market_ticker_list(target_date, market="KOSDAQ")
-                
+        try:
+            kospi = stock.get_market_ticker_list(date, market="KOSPI")
+            kosdaq = stock.get_market_ticker_list(date, market="KOSDAQ")
+
+            if len(kospi) > 100:
+                ticker_map = {}
+
+                for t in kospi:
+                    ticker_map[t] = stock.get_market_ticker_name(t)
+                for t in kosdaq:
+                    ticker_map[t] = stock.get_market_ticker_name(t)
+
                 combined = []
-                # 코스피/코스닥 상위 500개씩 총 1000개 구성
-                for t in kospi_list[:500]:
-                    combined.append({"ticker": t + ".KS", "name": ticker_to_name.get(t, t)})
-                for t in kosdaq_list[:500]:
-                    combined.append({"ticker": t + ".KQ", "name": ticker_to_name.get(t, t)})
-                
-                return combined, target_date
+
+                for t in kospi[:400]:
+                    combined.append({"ticker": t + ".KS", "name": ticker_map.get(t, t)})
+
+                for t in kosdaq[:400]:
+                    combined.append({"ticker": t + ".KQ", "name": ticker_map.get(t, t)})
+
+                return combined, date
+
         except:
             continue
+
     return [], ""
 
 # ==========================================
-# 📊 점수 계산 (안정화)
+# 📊 점수 계산
 # ==========================================
 def calculate_score(df):
     try:
-        # yfinance 멀티인덱스 컬럼 대응
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
+
         close = df['Close'].astype(float)
         vol = df['Volume'].astype(float)
-        if len(df) < 60: return 0, 0, 0
 
-        curr_p = float(close.iloc[-1])
+        if len(df) < 60:
+            return 0, 0, 0, False
+
         score = 0
+        curr = close.iloc[-1]
 
-        # 거래량 (25점)
-        avg_v = vol.iloc[-21:-1].mean() + 1e-9
-        v_ratio = vol.iloc[-1] / avg_v
-        if 0.2 < v_ratio < 1.2: score += 25
-        elif v_ratio < 2.0: score += 15
+        avg_v = vol.iloc[-20:-5].mean() + 1e-9
+        recent_v = vol.iloc[-5:].mean()
 
-        # 이평선 수렴 (20점)
-        m5, m20, m60 = close.rolling(5).mean().iloc[-1], close.rolling(20).mean().iloc[-1], close.rolling(60).mean().iloc[-1]
-        gap = max(m5, m20, m60) / (min(m5, m20, m60) + 1e-9)
-        if gap < 1.05: score += 20
-        elif gap < 1.08: score += 10
+        if recent_v < avg_v * 0.8:
+            score += 25
+        elif recent_v < avg_v:
+            score += 15
 
-        # 추세/위치 (30점)
-        if close.rolling(60).mean().iloc[-1] >= close.rolling(60).mean().iloc[-5]: score += 15
-        if curr_p > close.iloc[-60:].max() * 0.75: score += 15
+        r20 = (close.iloc[-20:].max() - close.iloc[-20:].min()) / curr
+        r5 = (close.iloc[-5:].max() - close.iloc[-5:].min()) / curr
 
-        # 변동성 (15점)
-        r10 = (close.iloc[-10:].max() - close.iloc[-10:].min()) / (curr_p + 1e-9)
-        if r10 < 0.12: score += 15
-        elif r10 < 0.20: score += 10
+        if r5 < r20 * 0.7:
+            score += 25
+        elif r5 < r20:
+            score += 15
 
-        # 상승압력 (10점)
-        if close.iloc[-1] >= close.iloc[-3]: score += 10
+        m20 = close.rolling(20).mean().iloc[-1]
+        m60 = close.rolling(60).mean().iloc[-1]
 
-        entry = float(close.iloc[-10:].max() * 1.005)
-        stop = float(close.iloc[-10:].min() * 0.98)
-        return score, entry, stop
-    except: return 0, 0, 0
+        if curr > m20 > m60:
+            score += 20
+
+        pos = curr / (close.iloc[-60:].max() + 1e-9)
+        if 0.65 < pos < 0.95:
+            score += 20
+
+        if close.iloc[-1] > close.iloc[-3]:
+            score += 10
+
+        high5 = close.iloc[-5:].max()
+        low5 = close.iloc[-5:].min()
+
+        entry = high5 * 1.01
+        stop = low5 * 0.97
+
+        breakout_ready = curr >= high5 * 0.92
+
+        return score, entry, stop, breakout_ready
+
+    except:
+        return 0, 0, 0, False
 
 # ==========================================
-# 🔍 개별 종목 분석
+# 🔥 A급 필터
 # ==========================================
-def analyze_ticker(item):
+def is_strong_A(df):
     try:
-        # 야후 차단 방지용 미세 지연
-        time.sleep(0.05)
-        df = yf.download(item['ticker'], period="8mo", interval="1d", progress=False, show_errors=False)
-        if df.empty or len(df) < 60: return None
+        close = df['Close'].astype(float)
+        vol = df['Volume'].astype(float)
 
-        score, entry, stop = calculate_score(df)
-        if score < 40: return None
+        vol_past = vol.iloc[-10:-3].mean()
+        vol_recent = vol.iloc[-3:].mean()
 
-        close_val = float(df['Close'].iloc[-1])
-        h5 = float(df['Close'].iloc[-5:].max())
-        is_break = close_val >= h5 * 0.95
+        vol_signal = vol_recent > vol_past * 1.2
+        momentum = close.iloc[-1] > close.iloc[-2] * 1.01
+
+        high20 = close.iloc[-20:].max()
+        near_res = close.iloc[-1] >= high20 * 0.90
+
+        prev_low = close.iloc[-20:-5].min()
+        recent_low = close.iloc[-5:].min()
+
+        higher_low = recent_low > prev_low
+
+        return vol_signal and momentum and near_res and higher_low
+
+    except:
+        return False
+
+# ==========================================
+# 🔍 분석
+# ==========================================
+def analyze(item):
+    try:
+        time.sleep(0.01)
+
+        df = yf.download(item['ticker'], period="6mo", interval="1d", progress=False)
+
+        if df.empty or len(df) < 60:
+            return None, False
+
+        score, entry, stop, ready = calculate_score(df)
+
+        if score < 40:
+            return None, True
+
+        strong_A = is_strong_A(df)
 
         return {
-            "name": item['name'], "ticker": item['ticker'].split('.')[0],
-            "price": close_val, "score": score, "entry": entry, "stop": stop, "breakout": is_break
-        }
-    except: return None
+            "name": item['name'],
+            "score": score,
+            "entry": entry,
+            "stop": stop,
+            "ready": ready,
+            "strong_A": strong_A
+        }, True
+
+    except:
+        return None, False
 
 # ==========================================
-# 🚀 메인 실행
+# 🚀 실행
 # ==========================================
-def run_scanner():
-    print("🚀 스캐너 가동...")
-    tickers, target_date = get_valid_tickers()
-    
+def run():
+    print("🚀 스캐너 시작")
+
+    tickers, date = get_valid_tickers()
+
     if not tickers:
-        send_telegram("❌ 종목 리스트를 가져오지 못했습니다. 날짜 오류 의심.")
+        send_telegram("❌ 종목 못 가져옴")
         return
 
+    total = len(tickers)
+    success = 0
+    valid = 0
+
     A, B, C = [], [], []
-    start_time = time.time()
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(analyze_ticker, it) for it in tickers]
-        for idx, future in enumerate(as_completed(futures)):
-            r = future.result()
-            if not r: continue
+    start = time.time()
 
-            if r["score"] >= 65 and r["breakout"]: A.append(r)
-            elif r["score"] >= 55: B.append(r)
-            elif r["score"] >= 45: C.append(r)
+    with ThreadPoolExecutor(max_workers=15) as ex:
+        futures = [ex.submit(analyze, t) for t in tickers]
 
-            if (idx + 1) % 100 == 0:
-                print(f"📊 분석 중: {idx + 1}/{len(tickers)}...")
+        for f in as_completed(futures):
+            r, ok = f.result()
 
-    elapsed = round(time.time() - start_time, 1)
+            if ok:
+                success += 1
 
-    # 메시지 생성
-    msg = f"<b>📊 [매집 스캐너 리포트]</b>\n📅 기준: {target_date}\n⏱ 소요: {elapsed}초\n\n"
-    
-    msg += "<b>🔥 A급 (즉시)</b>\n"
-    if A:
-        for x in A[:6]:
-            msg += f"• {x['name']} ({x['score']}점)\n  {int(x['price']):,} -> 목표 {int(x['entry']):,}\n"
-    else: msg += "없음\n"
+            if not r:
+                continue
 
-    msg += "\n<b>👀 B급 (관찰)</b>\n"
-    msg += ", ".join([f"<b>{x['name']}</b>" for x in B[:10]]) if B else "없음"
+            valid += 1
 
-    msg += "\n\n<b>🌱 C급 (매집)</b>\n"
-    msg += ", ".join([x['name'] for x in C[:15]]) if C else "없음"
+            if r["score"] >= 60 and r["ready"] and r["strong_A"]:
+                A.append(r)
+            elif r["score"] >= 55 and r["ready"]:
+                B.append(r)
+            else:
+                C.append(r)
+
+    elapsed = round(time.time() - start, 1)
+
+    # ==========================================
+    # 📩 결과
+    # ==========================================
+    msg = f"<b>📊 확률형 + A필터 스캐너</b>\n"
+    msg += f"📅 {date}\n"
+    msg += f"📈 전체: {total} / 성공: {success} / 유효: {valid}\n"
+    msg += f"⏱ {elapsed}초\n\n"
+
+    msg += "<b>🔥 A급 (고확률)</b>\n"
+    msg += "\n".join([f"{x['name']} ({x['score']})" for x in A[:5]]) if A else "없음"
+
+    msg += "\n\n<b>👀 B급 (유력)</b>\n"
+    msg += ", ".join([x['name'] for x in B[:10]]) if B else "없음"
+
+    msg += "\n\n<b>🌱 C급 (초기)</b>\n"
+    msg += ", ".join([x['name'] for x in C[:10]]) if C else "없음"
 
     send_telegram(msg)
-    print(f"✅ 작업 완료! A:{len(A)} B:{len(B)} C:{len(C)}")
 
+    print(f"✅ 완료 A:{len(A)} B:{len(B)} C:{len(C)}")
+
+# ==========================================
+# ▶ 실행
+# ==========================================
 if __name__ == "__main__":
-    run_scanner()
+    run()
