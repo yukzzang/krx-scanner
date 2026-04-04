@@ -9,8 +9,8 @@ from io import StringIO
 # ==========================================
 # 🔧 설정 (사용자 정보 입력)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = "YOUR_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 
 MIN_SCORE = 50
 MIN_VALUE = 5_000_000_000  # 거래대금 최소 50억 (필요시 조정)
