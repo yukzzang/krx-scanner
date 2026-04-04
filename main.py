@@ -7,217 +7,196 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
 # ==========================================
-# 🔧 설정
+# 🔧 설정 (사용자 정보 입력)
 # ==========================================
 TELEGRAM_TOKEN = "YOUR_TOKEN"
 CHAT_ID = "YOUR_CHAT_ID"
 
 MIN_SCORE = 50
-MIN_VALUE = 5_000_000_000  # 50억
+MIN_VALUE = 5_000_000_000  # 거래대금 최소 50억 (필요시 조정)
 
 # ==========================================
-# 📩 텔레그램
+# 📩 텔레그램 전송 (HTML 모드 적용)
 # ==========================================
 def send_telegram(msg):
-    print("\n📩 텔레그램 전송 시도")
-    try:
-        res = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg[:4000]},
-            timeout=10
-        )
-        print("응답:", res.status_code)
-    except Exception as e:
-        print("❌ 오류:", e)
+    max_len = 3500
+    for i in range(0, len(msg), max_len):
+        part = msg[i:i+max_len]
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": CHAT_ID,
+                "text": part,
+                "parse_mode": "HTML"
+            }
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code != 200:
+                print(f"❌ 전송 실패: {res.text}")
+        except Exception as e:
+            print(f"❌ 텔레그램 통신 오류: {e}")
 
 # ==========================================
-# 📅 종목 가져오기 (필터 포함)
+# 📅 종목 리스트 가져오기 (KRX)
 # ==========================================
 def get_tickers():
-    print("🔎 KRX 종목 수집 중...")
+    try:
+        url = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+        html = requests.get(url).text
+        df = pd.read_html(StringIO(html), header=0)[0]
 
-    url = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-    html = requests.get(url).text
-    df = pd.read_html(StringIO(html), header=0)[0]
+        df['종목코드'] = df['종목코드'].apply(lambda x: str(x).zfill(6))
+        tickers = []
 
-    df['종목코드'] = df['종목코드'].apply(lambda x: str(x).zfill(6))
+        for _, row in df.iterrows():
+            code = row['종목코드']
+            name = row['회사명']
+            market = row['시장구분']
 
-    tickers = []
+            if not code.isdigit(): continue
+            if any(x in name for x in ["우", "스팩", "리츠", "ETN", "ETF"]): continue
 
-    for _, row in df.iterrows():
-        code = row['종목코드']
-        name = row['회사명']
-        market = row['시장구분']
-
-        # 필터
-        if not code.isdigit():
-            continue
-        if "우" in name or "스팩" in name or "리츠" in name:
-            continue
-
-        # 시장 구분
-        if "코스닥" in market:
-            ticker = code + ".KQ"
-        elif "코스피" in market:
-            ticker = code + ".KS"
-        else:
-            continue
-
-        tickers.append({
-            "ticker": ticker,
-            "name": name
-        })
-
-    print(f"✅ 필터 후 종목 수: {len(tickers)}")
-    return tickers
+            ticker = f"{code}.KQ" if "코스닥" in market else f"{code}.KS"
+            tickers.append({"ticker": ticker, "name": name})
+        return tickers
+    except Exception as e:
+        print(f"❌ 종목 리스트 획득 오류: {e}")
+        return []
 
 # ==========================================
-# 📊 점수 계산
+# 📈 점수 계산 (데이터 안전 처리)
 # ==========================================
 def calculate_score(df):
     try:
-        close = df['Close']
-        vol = df['Volume']
+        # 데이터가 MultiIndex인 경우를 대비해 Squeeze 처리
+        close = df['Close'].squeeze()
+        vol = df['Volume'].squeeze()
 
-        if len(df) < 60:
-            return 0, False
+        if len(close) < 60: return 0, False
 
-        curr = close.iloc[-1]
-        s = 0
+        curr = float(close.iloc[-1])
+        score = 0
 
-        # 거래량 변화
+        # 1. 거래량 증가 (최근 3일 평균 > 이전 7일 평균)
         if vol.iloc[-3:].mean() > vol.iloc[-10:-3].mean():
-            s += 20
+            score += 20
 
-        # 변동성 축소
+        # 2. 변동성 축소 (VCP 패턴 기초)
         r20 = (close.iloc[-20:].max() - close.iloc[-20:].min()) / curr
         r5 = (close.iloc[-5:].max() - close.iloc[-5:].min()) / curr
-        if r5 < r20:
-            s += 20
+        if r5 < r20: score += 20
 
-        # 이평 (완화 버전)
+        # 3. 이평선 정배열 기초 (20일 > 60일 & 현재가 > 20일)
         m20 = close.rolling(20).mean().iloc[-1]
         m60 = close.rolling(60).mean().iloc[-1]
-        if m20 > m60 and curr > m20:
-            s += 20
+        if m20 > m60 and curr > m20: score += 20
 
-        # 위치
-        if curr > close.iloc[-60:].max() * 0.7:
-            s += 20
+        # 4. 가격 위치 (최근 60일 고가 대비 70% 이상 지점)
+        if curr > close.iloc[-60:].max() * 0.7: score += 20
 
-        # 상승
-        if close.iloc[-1] > close.iloc[-3]:
-            s += 10
+        # 5. 단기 상승세
+        if close.iloc[-1] > close.iloc[-3]: score += 10
 
+        # 돌파 임박 (최근 5일 고가에 근접)
         ready = curr >= close.iloc[-5:].max() * 0.92
-
-        return s, ready
-
+        return score, ready
     except:
         return 0, False
 
 # ==========================================
-# 🔥 A급 필터
+# ⚡ 강한 필터 (강세 종목)
 # ==========================================
 def strong_filter(df):
     try:
-        close = df['Close']
-        vol = df['Volume']
-
+        close = df['Close'].squeeze()
+        vol = df['Volume'].squeeze()
+        
         v = vol.iloc[-3:].mean() > vol.iloc[-10:-3].mean() * 1.2
         m = close.iloc[-1] > close.iloc[-2] * 1.01
         r = close.iloc[-1] >= close.iloc[-20:].max() * 0.9
-
-        return v and m and r
+        return bool(v and m and r)
     except:
         return False
 
 # ==========================================
-# 🔍 분석
+# 🔍 개별 분석 실행
 # ==========================================
 def analyze(item):
     try:
-        time.sleep(0.01)
-
+        # 데이터 다운로드
         df = yf.download(item['ticker'], period="6mo", progress=False, threads=False)
+        if df.empty or len(df) < 60: return None, True
 
-        if df.empty:
-            return None, False
+        # MultiIndex 컬럼 제거 (yf 업데이트 대응)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-        # 🔥 거래대금 필터
-        value = (df['Close'].iloc[-1] * df['Volume'].iloc[-1])
-        if value < MIN_VALUE:
-            return None, True
+        close = df['Close'].squeeze()
+        vol = df['Volume'].squeeze()
 
-        s, ready = calculate_score(df)
+        # 거래대금 필터 (최근일 기준)
+        value = float(close.iloc[-1]) * float(vol.iloc[-1])
+        if value < MIN_VALUE: return None, True
 
-        if s < MIN_SCORE:
-            return None, True
+        score, ready = calculate_score(df)
+        if score < MIN_SCORE: return None, True
 
         return {
             "name": item['name'],
-            "score": s,
+            "ticker": item['ticker'].split('.')[0],
+            "score": score,
             "ready": ready,
             "strong": strong_filter(df)
         }, True
-
-    except:
+    except Exception as e:
         return None, False
 
 # ==========================================
-# 🚀 실행
+# 🚀 메인 컨트롤러
 # ==========================================
 def run():
+    print("🚀 스캔 시작...")
     tickers = get_tickers()
-
     total = len(tickers)
-    success = 0
-    valid = 0
-
+    success, valid = 0, 0
     A, B, C = [], [], []
 
+    # 스레드 15개로 병렬 처리
     with ThreadPoolExecutor(max_workers=15) as ex:
         futures = [ex.submit(analyze, t) for t in tickers]
-
         for f in as_completed(futures):
             r, ok = f.result()
-
-            if ok:
-                success += 1
-
-            if not r:
-                continue
-
+            if ok: success += 1
+            if not r: continue
             valid += 1
 
-            if r["score"] >= 60 and r["ready"] and r["strong"]:
-                A.append(r)
-            elif r["score"] >= 50:
-                B.append(r)
-            else:
-                C.append(r)
+            if r["score"] >= 70 and r["ready"] and r["strong"]: A.append(r)
+            elif r["score"] >= 60: B.append(r)
+            else: C.append(r)
 
-    # ==========================================
-    # 📩 결과
-    # ==========================================
-    msg = f"📊 KRX 확률 스캐너\n"
-    msg += f"전체:{total} 성공:{success} 유효:{valid}\n\n"
+    # 결과 정렬
+    A = sorted(A, key=lambda x: x['score'], reverse=True)[:15]
+    B = sorted(B, key=lambda x: x['score'], reverse=True)[:10]
+    C = sorted(C, key=lambda x: x['score'], reverse=True)[:10]
 
-    msg += "🔥 A급\n"
-    msg += "\n".join([f"{x['name']} ({x['score']})" for x in A[:5]]) if A else "없음"
+    # 메시지 작성
+    header = f"<b>📊 KRX Market Scanner</b>\n"
+    header += f"전체: {total} | 성공: {success} | 필터통과: {valid}\n"
+    header += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
 
-    msg += "\n\n👀 B급\n"
-    msg += ", ".join([x['name'] for x in B[:10]]) if B else "없음"
+    msg = header
+    if A:
+        msg += "<b>🔥 A급 (강력 매수 후보)</b>\n"
+        msg += "\n".join([f"• {x['name']}({x['ticker']}) - <b>{int(x['score'])}점</b>" for x in A]) + "\n\n"
+    
+    if B:
+        msg += "<b>👀 B급 (추적 관찰)</b>\n"
+        msg += ", ".join([f"{x['name']}" for x in B]) + "\n\n"
 
-    msg += "\n\n🌱 C급\n"
-    msg += ", ".join([x['name'] for x in C[:10]]) if C else "없음"
+    if not A and not B:
+        msg += "⚠️ 현재 조건에 부합하는 종목이 없습니다."
 
     send_telegram(msg)
+    print(f"✅ 스캔 완료! A:{len(A)} B:{len(B)} C:{len(C)}")
 
-    print(f"✅ 완료 A:{len(A)} B:{len(B)} C:{len(C)}")
-
-# ==========================================
-# ▶ 실행
-# ==========================================
 if __name__ == "__main__":
     run()
